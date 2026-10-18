@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package bridge.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1;bridgev1";
+
+// CloudEvent is internal/event.Event on the wire, field for field
+// (infra-bootstrap ADR-0059 §3).
+message CloudEvent {
+  // Bridge-assigned log position. Ack, Nack and Replay take it. Ignored on Publish.
+  int64 seq = 1;
+  // CloudEvents id, unique per source only. Publish dedups on (source, id);
+  // subscribers dedup on (source, id) or seq, never on id alone.
+  string id = 2;
+  // Set by the bridge on Publish: "client/<name>".
+  string source = 3;
+  string type = 4;
+  // Thread key, e.g. "github/MohammadBnei/editable-blog/pr/42".
+  string subject = 5;
+  google.protobuf.Timestamp time = 6;
+  // JSON.
+  bytes data = 7;
+  // human | bot | agent | machine.
+  string actor = 8;
+  string actor_login = 9;
+  bool trusted = 10;
+  string owner = 11;
+  int32 hops = 12;
+  string causation_id = 13;
+  // Only Replay sets it.
+  bool replayed = 14;
+}
+
+// BridgeService is the bus API. Callers authenticate with a bearer token
+// declared in BRIDGE_CLIENTS.
+service BridgeService {
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  // Subscribe streams matching events after the subscription's cursor, one at
+  // a time: the next is sent only after the current one is acked or dead-lettered.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Nack(NackRequest) returns (NackResponse);
+  // Replay re-streams logged events from from_seq up to the current head with
+  // replayed=true. It needs no ack and moves no cursor.
+  rpc Replay(ReplayRequest) returns (stream ReplayResponse);
+}
+
+message PublishRequest {
+  CloudEvent event = 1;
+}
+
+message PublishResponse {
+  // True when (source, id) was already in the log; nothing was appended.
+  bool duplicate = 1;
+}
+
+message SubscribeRequest {
+  // The client's own name, or "<client>/<suffix>".
+  string name = 1;
+  // Type prefixes. Empty matches every type.
+  repeated string types = 2;
+  // Subject globs: '*' matches any run of characters ('/' included), '?' one.
+  // Empty matches every subject.
+  repeated string subjects = 3;
+}
+
+message SubscribeResponse {
+  CloudEvent event = 1;
+}
+
+message AckRequest {
+  string subscription = 1;
+  int64 seq = 2;
+}
+
+message AckResponse {}
+
+message NackRequest {
+  string subscription = 1;
+  int64 seq = 2;
+  string reason = 3;
+}
+
+message NackResponse {}
+
+message ReplayRequest {
+  string subscription = 1;
+  int64 from_seq = 2;
+}
+
+message ReplayResponse {
+  CloudEvent event = 1;
+}

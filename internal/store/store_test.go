@@ -22,7 +22,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.db.Exec(context.Background(), `TRUNCATE events RESTART IDENTITY`); err != nil {
+	if _, err := s.db.Exec(context.Background(), `TRUNCATE events, subscriptions, dead_letters RESTART IDENTITY`); err != nil {
 		t.Fatal(err)
 	}
 	return s
