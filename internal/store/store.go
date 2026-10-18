@@ -68,3 +68,22 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	}
 	return true, tx.Commit(ctx)
 }
+
+// Known reports which of ids are already in the log under any source. The
+// GitHub reconcile loop uses it: delivery GUIDs are globally unique, and the
+// deliveries API names the repository by id, not by the full_name in source.
+func (s *Store) Known(ctx context.Context, ids []string) (map[string]bool, error) {
+	rows, err := s.db.Query(ctx, `SELECT ce_id FROM events WHERE ce_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	known, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]bool, len(known))
+	for _, id := range known {
+		m[id] = true
+	}
+	return m, nil
+}

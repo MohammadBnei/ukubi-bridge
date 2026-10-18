@@ -17,3 +17,5 @@ CREATE TABLE IF NOT EXISTS events (
     ingested_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (source, ce_id)
 );
+-- The GitHub reconcile loop looks deliveries up by GUID alone.
+CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
