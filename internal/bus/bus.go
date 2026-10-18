@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -40,11 +41,14 @@ type Client struct {
 	TokenSHA256  string   `json:"token_sha256"`  // hex sha256 of the bearer token
 	Kind         string   `json:"kind"`          // actor stamped on its events; default machine
 	PublishTypes []string `json:"publish_types"` // type prefixes it may publish
-	Subscribe    bool     `json:"subscribe"`
-	Privileged   bool     `json:"privileged"` // may set actor, trusted, hops, causation_id (agent-fleet core only)
+	// Subject prefixes it may publish on; "" allows any. Keeps an app off
+	// threads it does not own, e.g. github/... PRs (parking is per subject).
+	PublishSubjects []string `json:"publish_subjects"`
+	Subscribe       bool     `json:"subscribe"`
+	Privileged      bool     `json:"privileged"` // may set actor, trusted, hops, causation_id (agent-fleet core only)
 }
 
-// ParseClients reads BRIDGE_CLIENTS: {"name": {token_sha256, kind, publish_types, subscribe, privileged}}.
+// ParseClients reads BRIDGE_CLIENTS: {"name": {token_sha256, kind, publish_types, publish_subjects, subscribe, privileged}}.
 func ParseClients(js string) (map[string]Client, error) {
 	clients := map[string]Client{}
 	if js == "" {
@@ -142,6 +146,16 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	if !slices.ContainsFunc(c.PublishTypes, func(pre string) bool { return strings.HasPrefix(p.GetType(), pre) }) {
 		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not publish %s", c.Name, p.GetType()))
 	}
+	if !slices.ContainsFunc(c.PublishSubjects, func(pre string) bool { return strings.HasPrefix(p.GetSubject(), pre) }) {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not publish on subject %s", c.Name, p.GetSubject()))
+	}
+	// Negative hops would undercut the +1 stamp below; MaxInt32 would overflow it.
+	// ponytail: an unprivileged client's hops is still its own claim (it can
+	// send 0); derive it from the causation_id event's stored hops if an app
+	// ever drives a loop.
+	if p.GetHops() < 0 || p.GetHops() == math.MaxInt32 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("hops out of range"))
+	}
 	data := p.GetData()
 	if len(data) == 0 {
 		data = []byte("null")
@@ -169,6 +183,9 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 		e.Hops++
 	}
 	inserted, err := s.st.Insert(ctx, e)
+	if store.Invalid(err) {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err) // retrying cannot help
+	}
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
@@ -279,7 +296,7 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 		return nil, err
 	}
 	if err := s.st.Ack(ctx, sub, seq); err != nil {
-		st.done <- outcome{} // redeliver; subscribers are idempotent on the event
+		st.done <- outcome{} // redeliver; subscribers are idempotent on (source, id)
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 	st.done <- outcome{advanced: true}

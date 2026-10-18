@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -61,8 +62,8 @@ func setup(t *testing.T) fixture {
 	t.Cleanup(func() { db.Close(ctx) })
 
 	clients, err := ParseClients(fmt.Sprintf(`{
-		"core": {"token_sha256": %q, "kind": "agent", "publish_types": ["dev."], "subscribe": true, "privileged": true},
-		"app":  {"token_sha256": %q, "kind": "bot", "publish_types": ["dev.app."], "subscribe": true}
+		"core": {"token_sha256": %q, "kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "subscribe": true, "privileged": true},
+		"app":  {"token_sha256": %q, "kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"], "subscribe": true}
 	}`, hash("core-token"), hash("app-token")))
 	if err != nil {
 		t.Fatal(err)
@@ -137,13 +138,13 @@ func ev(id, subject string) *bridgev1.CloudEvent {
 
 func TestPublishDedup(t *testing.T) {
 	f := setup(t)
-	if f.publish(t, "app-token", ev("d1", "x")) {
+	if f.publish(t, "app-token", ev("d1", "app/x")) {
 		t.Fatal("first publish reported duplicate")
 	}
-	if !f.publish(t, "app-token", ev("d1", "x")) {
+	if !f.publish(t, "app-token", ev("d1", "app/x")) {
 		t.Fatal("second publish of the same id was appended")
 	}
-	if f.publish(t, "core-token", ev("d1", "x")) {
+	if f.publish(t, "core-token", ev("d1", "app/x")) {
 		t.Fatal("same id from another client is a different source, not a duplicate")
 	}
 }
@@ -252,7 +253,7 @@ func TestReplay(t *testing.T) {
 func TestAuthz(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	claim := &bridgev1.CloudEvent{Id: "z1", Type: "dev.app.x", Subject: "z", Actor: "human", ActorLogin: "operator",
+	claim := &bridgev1.CloudEvent{Id: "z1", Type: "dev.app.x", Subject: "app/z", Actor: "human", ActorLogin: "operator",
 		Trusted: true, Owner: "zot", Hops: 2, CausationId: "c1", Replayed: true}
 	f.publish(t, "app-token", claim)
 	claim.Id = "z2"
@@ -294,6 +295,10 @@ func TestAuthz(t *testing.T) {
 			_, err := f.api.Publish(ctx, as("app-token", &bridgev1.PublishRequest{Event: &bridgev1.CloudEvent{Id: "z4", Type: "dev.github.x", Subject: "z"}}))
 			return err
 		}(), connect.CodePermissionDenied},
+		{"subject outside publish_subjects", func() error {
+			_, err := f.api.Publish(ctx, as("app-token", &bridgev1.PublishRequest{Event: &bridgev1.CloudEvent{Id: "z5", Type: "dev.app.x", Subject: "github/MohammadBnei/editable-blog/pr/42"}}))
+			return err
+		}(), connect.CodePermissionDenied},
 		{"another client's subscription", func() error {
 			_, err := f.api.Ack(ctx, as("app-token", &bridgev1.AckRequest{Subscription: "core", Seq: 1}))
 			return err
@@ -303,6 +308,24 @@ func TestAuthz(t *testing.T) {
 		var ce *connect.Error
 		if !errors.As(c.err, &ce) || ce.Code() != c.code {
 			t.Errorf("%s: %v, want %v", c.name, c.err, c.code)
+		}
+	}
+}
+
+// Events Postgres can never store are the client's fault, not an outage:
+// InvalidArgument, so a publisher that retries on Unavailable does not loop.
+func TestPublishInvalid(t *testing.T) {
+	f := setup(t)
+	cases := map[string]*bridgev1.CloudEvent{
+		"NUL in subject":     {Id: "i1", Type: "dev.app.x", Subject: "app/x\x00y"},
+		"\\u0000 in data":    {Id: "i2", Type: "dev.app.x", Subject: "app/x", Data: []byte(`{"a":"\u0000"}`)},
+		"negative hops":      {Id: "i3", Type: "dev.app.x", Subject: "app/x", Hops: -50},
+		"hops overflows int": {Id: "i4", Type: "dev.app.x", Subject: "app/x", Hops: math.MaxInt32},
+	}
+	for name, e := range cases {
+		_, err := f.api.Publish(context.Background(), as("app-token", &bridgev1.PublishRequest{Event: e}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s: %v, want InvalidArgument", name, err)
 		}
 	}
 }

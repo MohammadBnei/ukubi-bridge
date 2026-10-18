@@ -28,7 +28,8 @@ type CloudEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Bridge-assigned log position. Ack, Nack and Replay take it. Ignored on Publish.
 	Seq int64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	// CloudEvents id, unique per source. Publish dedups on (source, id).
+	// CloudEvents id, unique per source only. Publish dedups on (source, id);
+	// subscribers dedup on (source, id) or seq, never on id alone.
 	Id string `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
 	// Set by the bridge on Publish: "client/<name>".
 	Source string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`

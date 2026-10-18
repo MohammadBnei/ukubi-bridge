@@ -18,8 +18,12 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is
   scoped to the webhook path.
   - `Publish` — appends one event, deduplicated on `(source, id)`. The source
-    is always `client/<name>`. A non-privileged client's event is stamped with
-    its own `kind` as actor and its name as `actor_login`, `trusted=false`, no
+    is always `client/<name>`. A client publishes only types under its
+    `publish_types` and subjects under its `publish_subjects`, so an app
+    cannot post onto another source's thread (a GitHub PR, say). Negative
+    `hops` is refused. An event Postgres cannot store (NUL in a string,
+    `\u0000` in `data`) is `InvalidArgument`; `Unavailable` always means retry.
+    A non-privileged client's event is stamped with its own `kind` as actor and its name as `actor_login`, `trusted=false`, no
     `owner`, and `hops` one above what it sent (`causation_id` kept). Only a
     `privileged` client (agent-fleet core) sets actor, trust, owner and hops.
     Nobody sets `replayed`.
@@ -36,7 +40,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     never processed out of order.
   - `Replay(subscription, from_seq)` — streams the subscription's matching
     events from `from_seq` to the current head with `replayed=true`. No ack,
-    no cursor change, nothing written. Subscribers must be idempotent on `seq`.
+    no cursor change, nothing written. Subscribers must be idempotent on
+    `(source, id)` (or `seq`, which is the same event's log position) — never
+    on `id` alone: two clients can both publish id `1`.
 
 Not yet: the GitHub reconcile loop, Alertmanager/Grafana ingest, an API for
 dead letters.
@@ -61,7 +67,7 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins that may open threads (operator, `renovate[bot]`, CI). |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Trusted, and tagged `actor=agent`. |
-| `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes. Empty: every call is refused. |
+| `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes, `publish_subjects` subject prefixes (`""` allows any; an app gets its own, e.g. `["zot/"]`). Missing either: that client publishes nothing. Empty: every call is refused. |
 | `PORT` | Default `8080`. |
 
 ## Tests

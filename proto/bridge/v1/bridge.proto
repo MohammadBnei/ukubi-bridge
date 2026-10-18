@@ -11,7 +11,8 @@ option go_package = "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1
 message CloudEvent {
   // Bridge-assigned log position. Ack, Nack and Replay take it. Ignored on Publish.
   int64 seq = 1;
-  // CloudEvents id, unique per source. Publish dedups on (source, id).
+  // CloudEvents id, unique per source only. Publish dedups on (source, id);
+  // subscribers dedup on (source, id) or seq, never on id alone.
   string id = 2;
   // Set by the bridge on Publish: "client/<name>".
   string source = 3;

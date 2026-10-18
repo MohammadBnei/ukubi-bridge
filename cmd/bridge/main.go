@@ -98,6 +98,11 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			return
 		}
 		inserted, err := st.Insert(r.Context(), e)
+		if store.Invalid(err) {
+			slog.Warn("github: store refused delivery", "event", kind, "delivery", delivery, "err", err)
+			http.Error(w, "unusable payload", http.StatusBadRequest)
+			return
+		}
 		if err != nil {
 			// 503 so the delivery shows as failed; the reconcile loop redelivers it.
 			slog.Error("github: store", "delivery", delivery, "err", err)

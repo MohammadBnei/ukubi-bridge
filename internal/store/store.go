@@ -6,10 +6,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
@@ -122,6 +124,14 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
+}
+
+// Invalid reports whether Postgres refused err's values themselves (class 22
+// data exception, e.g. NUL in text, \u0000 in jsonb, integer out of range;
+// class 23 integrity): retrying the same event can never succeed.
+func Invalid(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && (strings.HasPrefix(pg.Code, "22") || strings.HasPrefix(pg.Code, "23"))
 }
 
 // Subscribe creates or refilters subscription name and returns its cursor.
