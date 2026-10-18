@@ -1,0 +1,208 @@
+# Test, build the bridge image on the build-runner LXC, push it to the in-cluster
+# Zot registry, then pin the tag in helm/values.yaml so ArgoCD rolls it out.
+# Copied from mountain's .github/workflows/app.yml (itself hq's); its gotchas,
+# paid for once:
+#   - every buildah call goes through sudo (rootless splits the auth file)
+#   - --tls-verify=false on login AND push (plain HTTP; LE can't issue for .lan)
+#   - the deploy job needs always() && result == 'success'
+#   - --layers, or buildah caches nothing; --pull=newer, or the Go base image
+#     stays at the patch the box first pulled
+#   - the bump pushes with GITHUB_TOKEN, which never triggers another run
+#     (and helm/** is not a trigger path, so the bump cannot loop either)
+#
+# This repo is PUBLIC, and that `if:` on build-push does NOT keep fork PRs off
+# the build runner. A pull_request run uses the workflow file from the PR's
+# merge commit, which the fork author writes, so they can add their own job
+# with `runs-on: [self-hosted, ukubi-build]`; on that box `sudo buildah` is
+# root. What stops it is the repo setting "require approval for all external
+# contributors": GET repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval
+# must return approval_policy = all_external_contributors. Read the workflow
+# diff of any fork PR before approving its run. Tests run
+# GitHub-hosted (wird's arrangement) and build-push only on push/dispatch so
+# that the base workflow itself never gives a PR the runner or the credential.
+name: app
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.github/workflows/app.yml'
+
+env:
+  REGISTRY: registry.bnei.lan:5000
+  # Not a secret, and an empty secret cost agent-fleet a release once.
+  REGISTRY_USER: ci
+  IMAGE: ukubi-bridge
+  # The registry password comes from the shared platform-commons project over
+  # GitHub OIDC (infra-bootstrap ADR-0049). The identity binds a repository
+  # allowlist (MohammadBnei/ukubi-bridge must be on it) plus event_name
+  # push/workflow_dispatch only.
+  INFISICAL_DOMAIN: https://infisical.bnei.dev
+  INFISICAL_PROJECT_SLUG: platform-commons-76pb
+  INFISICAL_ENV: dev
+  INFISICAL_IDENTITY_ID: 19807471-d73a-48d4-9e58-1dc34255ef77
+
+jobs:
+  # GitHub-hosted, so the store tests get a real Postgres from a service
+  # container and a fork PR never reaches the build runner.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: t
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      BRIDGE_TEST_DATABASE_URL: postgres://postgres:t@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: go vet + go test
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -race ./...
+
+  build-push:
+    needs: test
+    # Registry creds are readable only on push/workflow_dispatch (OIDC claim),
+    # and this job is the only one on the self-hosted runner.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, ukubi-build]
+    # Per ref: a dispatch on a branch must not cancel an in-flight main build,
+    # or that main commit never deploys. A newer run on the same ref supersedes.
+    concurrency:
+      group: app-build-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write # the Infisical OIDC login
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Compute the image tag
+        id: tag
+        run: echo "value=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Only REGISTRY_PASSWORD, not the whole environment.
+      - name: Read the registry password from Infisical
+        uses: Infisical/secrets-action@v1.0.12
+        with:
+          method: oidc
+          identity-id: ${{ env.INFISICAL_IDENTITY_ID }}
+          oidc-audience: infisical.bnei.dev
+          domain: ${{ env.INFISICAL_DOMAIN }}
+          project-slug: ${{ env.INFISICAL_PROJECT_SLUG }}
+          env-slug: ${{ env.INFISICAL_ENV }}
+          secret-path: /
+          secret-name: REGISTRY_PASSWORD
+          export-type: env
+
+      # GitHub masks only secrets.*; an unmasked Infisical value leaked a token
+      # in this estate once.
+      - name: Mask the fetched password
+        run: echo "::add-mask::$REGISTRY_PASSWORD"
+
+      # A per-job auth file, not root's shared one: nothing stays cached on the
+      # box for a later job, and the logout below cannot sign out a concurrent
+      # build of another repo (they all sudo into the same root).
+      - name: Registry login
+        run: |
+          set -euo pipefail
+          [ -n "${REGISTRY_PASSWORD:-}" ] || { echo "::error::Infisical returned no REGISTRY_PASSWORD"; exit 1; }
+          printf '%s' "$REGISTRY_PASSWORD" | sudo buildah login \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
+            --tls-verify=false \
+            --username "$REGISTRY_USER" \
+            --password-stdin "$REGISTRY"
+
+      # The SHA tag is what helm/values.yaml pins; latest is for humans and
+      # zot's retention policy, which keeps it explicitly.
+      - name: Build and push
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          sudo buildah bud \
+            --isolation chroot \
+            --format docker \
+            --layers \
+            --pull=newer \
+            -f Dockerfile \
+            -t "$REGISTRY/$IMAGE:$TAG" \
+            -t "$REGISTRY/$IMAGE:latest" \
+            .
+          for t in "$TAG" latest; do
+            sudo buildah push --authfile "$RUNNER_TEMP/registry-auth.json" \
+              --tls-verify=false "$REGISTRY/$IMAGE:$t"
+          done
+
+      # Its own step, so a failed push does not leave the tags in the shared store.
+      - name: Remove the local image
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: sudo buildah rmi "$REGISTRY/$IMAGE:$TAG" "$REGISTRY/$IMAGE:latest" || true
+
+      # The runner user cannot sudo rm, but buildah can clear its own entry.
+      - name: Registry logout
+        if: always()
+        run: sudo buildah logout --authfile "$RUNNER_TEMP/registry-auth.json" "$REGISTRY" || true
+
+  deploy:
+    needs: build-push
+    # A dispatch on another branch builds that branch; only main deploys.
+    if: always() && needs.build-push.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: app-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.build-push.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Bump the pinned image tag
+        run: |
+          set -euo pipefail
+          [ -n "$TAG" ] || { echo "::error::empty image tag"; exit 1; }
+          sed -i -E "s/^(  tag: \")[^\"]+(\")/\1${TAG}\2/" helm/values.yaml
+          # A no-op sed is the real failure mode: it commits nothing and the
+          # deploy looks green while the cluster keeps the old image.
+          grep -q "tag: \"${TAG}\"" helm/values.yaml \
+            || { echo "::error::tag bump did not land in helm/values.yaml"; exit 1; }
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "ukubi-bridge-ci"
+          git config user.email "noreply@bnei.dev"
+          git add helm/values.yaml
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(deploy): bump ukubi-bridge image to ${TAG}"
+          # main also takes local pushes; retry if it moves under us.
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            sleep 5
+          done
+          echo "::error::could not push the tag bump"; exit 1

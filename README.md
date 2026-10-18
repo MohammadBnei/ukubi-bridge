@@ -29,6 +29,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 - `GET /healthz`.
 
 Not yet: the `Publish`/`Subscribe`/`Ack`/`Replay` gRPC API.
+ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
+done here: the bridge has no thread ownership, so core's dispatcher drops them
+and the per-thread agent-wake cap bounds loops.
 
 ## Configuration
 

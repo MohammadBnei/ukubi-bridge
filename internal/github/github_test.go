@@ -70,15 +70,31 @@ func TestNormalizeTrust(t *testing.T) {
 	}
 }
 
+func comment(commenter, author string) []byte {
+	return []byte(fmt.Sprintf(`{"action":"created","sender":{"login":%q},"repository":{"full_name":"MohammadBnei/editable-blog"},
+"issue":{"number":7,"user":{"login":%q},"pull_request":{}},"comment":{"user":{"login":%q,"type":"User"}}}`, commenter, author, commenter))
+}
+
 func TestNormalizeComment(t *testing.T) {
-	body := []byte(`{"action":"created","sender":{"login":"stranger"},"repository":{"full_name":"MohammadBnei/editable-blog"},
-"issue":{"number":7,"pull_request":{}},"comment":{"user":{"login":"stranger","type":"User"}}}`)
-	e, err := Normalize(policy, "issue_comment", "d-2", body, time.Unix(0, 0))
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name    string
+		body    []byte
+		trusted bool
+	}{
+		{"outsider on outsider PR", comment("stranger", "stranger"), false},
+		{"outsider on trusted PR", comment("stranger", "MohammadBnei"), false},
+		// Trust needs both: a trusted comment must not adopt an outsider's PR.
+		{"trusted on outsider PR", comment("MohammadBnei", "stranger"), false},
+		{"trusted on trusted PR", comment("MohammadBnei", "renovate[bot]"), true},
 	}
-	if e.Subject != "github/MohammadBnei/editable-blog/pr/7" || e.Trusted {
-		t.Fatalf("comment on PR: %+v", e)
+	for _, c := range cases {
+		e, err := Normalize(policy, "issue_comment", "d-2", c.body, time.Unix(0, 0))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if e.Subject != "github/MohammadBnei/editable-blog/pr/7" || e.Trusted != c.trusted {
+			t.Errorf("%s: subject=%s trusted=%v, want trusted=%v", c.name, e.Subject, e.Trusted, c.trusted)
+		}
 	}
 }
 
