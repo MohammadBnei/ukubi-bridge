@@ -102,3 +102,18 @@ func TestInsertCommitOrder(t *testing.T) {
 		t.Fatalf("cursor saw %d of 200 rows: some committed below it", seen)
 	}
 }
+
+func TestKnown(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, err := s.Insert(ctx, ev("guid-1")); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Known(ctx, []string{"guid-1", "guid-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m["guid-1"] || m["guid-2"] || len(m) != 1 {
+		t.Fatalf("known = %v", m)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
@@ -43,6 +44,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
+	// Unset token: both answer 503 rather than serve open.
+	alertToken := os.Getenv("BRIDGE_ALERT_TOKEN")
+	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", alertToken, st.Insert))
+	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", alertToken, st.Insert))
+
+	if r := reconciler(st); r != nil {
+		go r.Loop(ctx, 10*time.Minute)
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -118,6 +127,30 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "trusted", e.Trusted, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
+}
+
+// reconciler is nil, with a warning, when the App credentials are absent:
+// ingest still works, lost deliveries just stay lost.
+func reconciler(st *store.Store) *github.Reconciler {
+	appID, pemKey := os.Getenv("BRIDGE_GITHUB_APP_ID"), os.Getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
+	if appID == "" || pemKey == "" {
+		slog.Warn("github reconcile disabled: BRIDGE_GITHUB_APP_ID or BRIDGE_GITHUB_APP_PRIVATE_KEY unset")
+		return nil
+	}
+	key, err := github.ParseKey(pemKey)
+	if err != nil {
+		slog.Error("BRIDGE_GITHUB_APP_PRIVATE_KEY", "err", err)
+		os.Exit(1)
+	}
+	lookback := 6 * time.Hour
+	if v := os.Getenv("BRIDGE_RECONCILE_LOOKBACK"); v != "" {
+		if lookback, err = time.ParseDuration(v); err != nil {
+			slog.Error("BRIDGE_RECONCILE_LOOKBACK", "err", err)
+			os.Exit(1)
+		}
+	}
+	return &github.Reconciler{API: "https://api.github.com", AppID: appID, Key: key, Lookback: lookback,
+		Known: st.Known, Client: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func set(csv string) map[string]bool {
