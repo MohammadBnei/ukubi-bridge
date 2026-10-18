@@ -44,6 +44,24 @@ func TestInsertDedup(t *testing.T) {
 	}
 }
 
+// jsonb rejects \u0000; Insert must store the payload, not fail forever.
+func TestInsertNullEscape(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	e := ev("nul")
+	e.Data = []byte(`{"body":"a\u0000b"}`)
+	if ok, err := s.Insert(ctx, e); !ok || err != nil {
+		t.Fatalf("insert: %v %v", ok, err)
+	}
+	var body string
+	if err := s.db.QueryRow(ctx, `SELECT data->>'body' FROM events WHERE ce_id = 'nul'`).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body != "a\ufffdb" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 // Ids must become visible in order: a reader that has seen id N must never
 // later find a new id below N. Concurrent inserts plus a polling reader check it.
 func TestInsertCommitOrder(t *testing.T) {

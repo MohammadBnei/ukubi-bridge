@@ -61,24 +61,49 @@ func main() {
 	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols)}
 	srv.Protocols.SetHTTP1(true)
 	srv.Protocols.SetUnencryptedHTTP2(true)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdown)
+		// Subscribe streams never go idle, so Shutdown times out on them; Close
+		// cancels their contexts, or st.Close would wait on their connections.
+		if srv.Shutdown(shutdown) != nil {
+			srv.Close()
+		}
 	}()
 	slog.Info("listening", "port", port)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}
+	// ListenAndServe returns as soon as Shutdown starts; wait for in-flight
+	// handlers before the deferred st.Close.
+	<-shutdownDone
 }
+
+// maxBody caps a /webhook/github body (see githubHandler).
+const maxBody = 2 << 20
 
 func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// GitHub caps payloads at 25 MB.
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 25<<20))
+		// The body is read before the HMAC can be checked, so this path lets
+		// anyone make the pod allocate: keep the cap far under the 128Mi limit.
+		// ponytail: 2 MB fits the subscribed events (PR, issue comment, review:
+		// bodies cap at 65536 chars, ~800 KB worst case JSON-escaped); raise it
+		// with the memory limit if a subscribed event ever outgrows it.
+		if r.ContentLength > maxBody {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "read body", http.StatusBadRequest)
 			return
 		}
@@ -104,7 +129,9 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			return
 		}
 		if err != nil {
-			// 503 so the delivery shows as failed; the reconcile loop redelivers it.
+			// 503 so the delivery shows as failed in the App's delivery log.
+			// GitHub never retries on its own: until the reconcile loop exists,
+			// a manual redelivery from that log is the only recovery.
 			slog.Error("github: store", "delivery", delivery, "err", err)
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return

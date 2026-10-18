@@ -46,6 +46,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 
 Not yet: the GitHub reconcile loop, Alertmanager/Grafana ingest, an API for
 dead letters.
+ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
+done here: the bridge has no thread ownership, so core's dispatcher drops them
+and the per-thread agent-wake cap bounds loops.
 
 ### Unparking a subject
 
