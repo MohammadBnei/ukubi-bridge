@@ -16,11 +16,10 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 - GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
   to the lookback window and redelivers, oldest first, each one not in
   `events` — failed (bridge downtime) or acknowledged with 202 (lost to a
-  Pigsty failover). A 204 (ignored type) is never checked. A GUID with 5
-  deliveries in the window, any status (each redelivery is a new one), or whose
-  original has left the window, is given up on and logged each run until it
-  leaves the window: about 40 minutes of retries, so a longer outage needs a
-  manual redelivery. A 403/429 ends the run; the next tick tries again.
+  Pigsty failover). A 204 (ignored type) is never checked. A GUID the bridge
+  rejected (4xx) 5 times, or whose original delivery has left the 6-hour
+  window, is given up on and logged. An outage (5xx, timeout) is retried until
+  then, so an outage longer than 6 hours needs a manual redelivery. A 403/429 ends the run; the next tick tries again.
 - `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
   one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
   `repeat_interval` resend of the same firing coalesces while its resolution

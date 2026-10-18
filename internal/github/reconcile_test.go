@@ -180,24 +180,26 @@ func TestReconcileStopsOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestPickCapsEveryStatus(t *testing.T) {
+func TestPickCapsRejectsNotOutages(t *testing.T) {
 	now := time.Now()
 	at := func(ago time.Duration, status int, redelivery bool) delivery {
 		return delivery{DeliveredAt: now.Add(-ago), StatusCode: status, Redelivery: redelivery}
 	}
-	var outage []delivery // newest first: four redeliveries of a 502, then the original
+	var outage, rejected []delivery // newest first: redeliveries, then the original
 	for i := range maxAttempts - 1 {
 		outage = append(outage, at(time.Duration(i)*time.Minute, 502, true))
+		rejected = append(rejected, at(time.Duration(i)*time.Minute, 400, true))
 	}
 	attempts := map[string][]delivery{
 		"retry":    {at(time.Minute, 502, true), at(time.Hour, 202, false)},
 		"fresh":    {at(2*time.Minute, 0, false)},
-		"outage":   append(slices.Clone(outage), at(5*time.Hour, 502, false)), // maxAttempts: give up
-		"orphaned": outage,                                                    // original left the window
+		"outage":   append(slices.Clone(outage), at(5*time.Hour, 502, false)),   // 5xx: keep retrying
+		"rejected": append(slices.Clone(rejected), at(5*time.Hour, 400, false)), // maxAttempts 4xx: give up
+		"orphaned": outage,                                                      // original left the window
 		"ignored":  {at(time.Minute, 204, false)},
 	}
-	redeliver, givenUp := pick(attempts, []string{"fresh", "retry", "outage", "orphaned", "ignored"})
-	if !slices.Equal(redeliver, []string{"retry", "fresh"}) || !slices.Equal(givenUp, []string{"outage", "orphaned"}) {
+	redeliver, givenUp := pick(attempts, []string{"fresh", "retry", "outage", "rejected", "orphaned", "ignored"})
+	if !slices.Equal(redeliver, []string{"outage", "retry", "fresh"}) || !slices.Equal(givenUp, []string{"rejected", "orphaned"}) {
 		t.Fatalf("redeliver %v, given up %v", redeliver, givenUp)
 	}
 }

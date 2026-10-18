@@ -20,11 +20,11 @@ import (
 	"time"
 )
 
-// maxAttempts caps the deliveries of one GUID in the window, whatever their
-// status: each redelivery is itself a new delivery in the window, so without a
-// cap a GUID that keeps failing never leaves it and is redelivered every run.
-// ponytail: at a 10-minute tick that gives up ~40 minutes after the first
-// failure; a longer outage needs a manual redelivery.
+// maxAttempts caps the 4xx deliveries of one GUID in the window: a payload the
+// bridge rejects will be rejected again. 5xx and timeouts (bridge or Pigsty
+// down) are retried until the original delivery leaves the window, which pick
+// checks via the redelivery flag — each redelivery is itself a new delivery in
+// the window, so the window alone would never end the loop.
 const maxAttempts = 5
 
 // Reconciler redelivers App webhook deliveries missing from the log, failed or
@@ -191,7 +191,13 @@ func pick(attempts map[string][]delivery, order []string) (redeliver, givenUp []
 			continue // check_run etc.: never in the log by design
 		}
 		// Only redeliveries left: the original fell out of the window.
-		if len(a) >= maxAttempts || !slices.ContainsFunc(a, func(d delivery) bool { return !d.Redelivery }) {
+		rejected := 0
+		for _, d := range a {
+			if d.StatusCode >= 400 && d.StatusCode < 500 {
+				rejected++
+			}
+		}
+		if rejected >= maxAttempts || !slices.ContainsFunc(a, func(d delivery) bool { return !d.Redelivery }) {
 			givenUp = append(givenUp, guid)
 			continue
 		}
