@@ -15,8 +15,9 @@
 # merge commit, which the fork author writes, so they can add their own job
 # with `runs-on: [self-hosted, ukubi-build]`; on that box `sudo buildah` is
 # root. What stops it is the repo setting "require approval for all external
-# contributors" (fork-pr-contributor-approval = all_external_contributors):
-# read the workflow diff of any fork PR before approving its run. Tests run
+# contributors": GET repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval
+# must return approval_policy = all_external_contributors. Read the workflow
+# diff of any fork PR before approving its run. Tests run
 # GitHub-hosted (wird's arrangement) and build-push only on push/dispatch so
 # that the base workflow itself never gives a PR the runner or the credential.
 name: app
@@ -82,8 +83,10 @@ jobs:
     # and this job is the only one on the self-hosted runner.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, ukubi-build]
+    # Per ref: a dispatch on a branch must not cancel an in-flight main build,
+    # or that main commit never deploys. A newer run on the same ref supersedes.
     concurrency:
-      group: app-build
+      group: app-build-${{ github.ref }}
       cancel-in-progress: true
     permissions:
       contents: read
