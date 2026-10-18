@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5"
@@ -208,6 +210,31 @@ func TestNackDeadLetterParksSubject(t *testing.T) {
 	}
 	if fmt.Sprint(got) != "[p1 p2]" {
 		t.Fatalf("dead letters %v, want [p1 p2]", got)
+	}
+}
+
+// A Nack reason Postgres cannot store must not block dead-lettering.
+func TestNackReasonSanitized(t *testing.T) {
+	f := setup(t)
+	ch := f.subscribe(t, "core/nul", "nul/*")
+	f.publish(t, "core-token", ev("n1", "nul/a"))
+	f.publish(t, "core-token", ev("n2", "nul/b"))
+
+	for range MaxAttempts {
+		e := recv(t, ch)
+		if _, err := f.api.Nack(context.Background(), as("core-token", &bridgev1.NackRequest{Subscription: "core/nul", Seq: e.Seq, Reason: "bad\x00" + strings.Repeat("é", 1000)})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e := recv(t, ch); e.Id != "n2" {
+		t.Fatalf("after dead-lettering n1 got %s, want n2", e.Id)
+	}
+	var reason string
+	if err := f.db.QueryRow(context.Background(), `SELECT reason FROM dead_letters WHERE subscription = 'core/nul'`).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(reason, "5 attempts: bad") || len(reason) > 1100 || !utf8.ValidString(reason) {
+		t.Fatalf("stored reason %q (%d bytes)", reason, len(reason))
 	}
 }
 

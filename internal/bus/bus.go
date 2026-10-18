@@ -324,7 +324,12 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 		st.done <- outcome{delay: RetryBase << (n - 1)}
 		return connect.NewResponse(&bridgev1.NackResponse{}), nil
 	}
-	reason := req.Msg.GetReason()
+	// The reason is client text bound for a Postgres text column: a NUL would
+	// fail DeadLetter on every retry and wedge the subscription head-of-line.
+	reason := strings.ReplaceAll(req.Msg.GetReason(), "\x00", "")
+	if len(reason) > 1024 {
+		reason = strings.ToValidUTF8(reason[:1024], "") // drop a rune cut in half
+	}
 	if reason == "" {
 		reason = "nacked"
 	}
