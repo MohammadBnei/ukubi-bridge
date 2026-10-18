@@ -21,8 +21,8 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     is always `client/<name>`. A client publishes only types under its
     `publish_types` and subjects under its `publish_subjects`, so an app
     cannot post onto another source's thread (a GitHub PR, say). Negative
-    `hops` is refused. An event Postgres cannot store (NUL in a string,
-    `\u0000` in `data`) is `InvalidArgument`; `Unavailable` always means retry.
+    `hops` is refused. An event Postgres cannot store (a NUL byte in a
+    string field) is `InvalidArgument` (`\u0000` in `data` is stored as `\ufffd`); `Unavailable` always means retry.
     A non-privileged client's event is stamped with its own `kind` as actor and its name as `actor_login`, `trusted=false`, no
     `owner`, and `hops` one above what it sent (`causation_id` kept). Only a
     `privileged` client (agent-fleet core) sets actor, trust, owner and hops.

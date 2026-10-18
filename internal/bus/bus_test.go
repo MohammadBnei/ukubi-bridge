@@ -345,7 +345,6 @@ func TestPublishInvalid(t *testing.T) {
 	f := setup(t)
 	cases := map[string]*bridgev1.CloudEvent{
 		"NUL in subject":     {Id: "i1", Type: "dev.app.x", Subject: "app/x\x00y"},
-		"\\u0000 in data":    {Id: "i2", Type: "dev.app.x", Subject: "app/x", Data: []byte(`{"a":"\u0000"}`)},
 		"negative hops":      {Id: "i3", Type: "dev.app.x", Subject: "app/x", Hops: -50},
 		"hops overflows int": {Id: "i4", Type: "dev.app.x", Subject: "app/x", Hops: math.MaxInt32},
 	}
@@ -354,5 +353,10 @@ func TestPublishInvalid(t *testing.T) {
 		if connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Errorf("%s: %v, want InvalidArgument", name, err)
 		}
+	}
+	// store.Insert rewrites \u0000 in data, so that one is stored, not refused.
+	e := &bridgev1.CloudEvent{Id: "i2", Type: "dev.app.x", Subject: "app/x", Data: []byte(`{"a":"\u0000"}`)}
+	if _, err := f.api.Publish(context.Background(), as("app-token", &bridgev1.PublishRequest{Event: e})); err != nil {
+		t.Errorf("\\u0000 in data: %v, want stored", err)
 	}
 }
