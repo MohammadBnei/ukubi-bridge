@@ -45,6 +45,10 @@ env:
   # has agent identities.
   - name: BRIDGE_AGENT_LOGINS
     value: ""
+  # Under limits.memory (128Mi), so the GC works harder before the kernel
+  # OOM-kills the pod. A soft limit: it does not cap the allocation itself.
+  - name: GOMEMLIMIT
+    value: "100MiB"
 
 livenessProbe:
   enabled: true

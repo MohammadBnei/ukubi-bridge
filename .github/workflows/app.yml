@@ -10,10 +10,15 @@
 #   - the bump pushes with GITHUB_TOKEN, which never triggers another run
 #     (and helm/** is not a trigger path, so the bump cannot loop either)
 #
-# One difference from mountain, because this repo is PUBLIC: nothing that runs
-# on pull_request touches the self-hosted runner. A fork PR's code would
-# otherwise execute on the box that holds the registry push credential. Tests
-# run GitHub-hosted (wird's arrangement); build-push only on push/dispatch.
+# This repo is PUBLIC, and that `if:` on build-push does NOT keep fork PRs off
+# the build runner. A pull_request run uses the workflow file from the PR's
+# merge commit, which the fork author writes, so they can add their own job
+# with `runs-on: [self-hosted, ukubi-build]`; on that box `sudo buildah` is
+# root. What stops it is the repo setting "require approval for all external
+# contributors" (fork-pr-contributor-approval = all_external_contributors):
+# read the workflow diff of any fork PR before approving its run. Tests run
+# GitHub-hosted (wird's arrangement) and build-push only on push/dispatch so
+# that the base workflow itself never gives a PR the runner or the credential.
 name: app
 
 on:
@@ -111,11 +116,15 @@ jobs:
       - name: Mask the fetched password
         run: echo "::add-mask::$REGISTRY_PASSWORD"
 
+      # A per-job auth file, not root's shared one: nothing stays cached on the
+      # box for a later job, and the logout below cannot sign out a concurrent
+      # build of another repo (they all sudo into the same root).
       - name: Registry login
         run: |
           set -euo pipefail
           [ -n "${REGISTRY_PASSWORD:-}" ] || { echo "::error::Infisical returned no REGISTRY_PASSWORD"; exit 1; }
           printf '%s' "$REGISTRY_PASSWORD" | sudo buildah login \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
             --tls-verify=false \
             --username "$REGISTRY_USER" \
             --password-stdin "$REGISTRY"
@@ -137,7 +146,8 @@ jobs:
             -t "$REGISTRY/$IMAGE:latest" \
             .
           for t in "$TAG" latest; do
-            sudo buildah push --tls-verify=false "$REGISTRY/$IMAGE:$t"
+            sudo buildah push --authfile "$RUNNER_TEMP/registry-auth.json" \
+              --tls-verify=false "$REGISTRY/$IMAGE:$t"
           done
 
       # Its own step, so a failed push does not leave the tags in the shared store.
@@ -146,6 +156,11 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.value }}
         run: sudo buildah rmi "$REGISTRY/$IMAGE:$TAG" "$REGISTRY/$IMAGE:latest" || true
+
+      # The runner user cannot sudo rm, but buildah can clear its own entry.
+      - name: Registry logout
+        if: always()
+        run: sudo buildah logout --authfile "$RUNNER_TEMP/registry-auth.json" "$REGISTRY" || true
 
   deploy:
     needs: build-push
