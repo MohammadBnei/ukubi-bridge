@@ -1,0 +1,74 @@
+# ukubi-bridge on infra-bootstrap's common-app-chart. Read by ArgoCD through
+# infra-bootstrap gitops/apps/registry.yaml (`valuesPath: [helm/values.yaml]`),
+# which also sets ingress.hostname: events.bnei.dev. Modelled on mountain's.
+
+# One writer to the events log and one LISTEN connection: never two pods, never
+# a rolling overlap (ADR-0059 Decision 1).
+replicaCount: 1
+strategy:
+  type: Recreate
+
+image:
+  repository: registry.bnei.lan:5000/ukubi-bridge
+  # Bumped by .github/workflows/app.yml to the commit's short SHA.
+  #
+  # `unreleased` is a placeholder that fails loudly. The registry entry in
+  # infra-bootstrap belongs after this repo's first CI run on main has replaced
+  # this line, or the first sync is an ImagePullBackOff against a tag that was
+  # never built (hq/wird/mountain have the same rule).
+  tag: "unreleased"
+
+service:
+  port: 8080
+
+# Public on ONE path. The chart's IngressRoute matches
+# Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz and the
+# future /webhook/alertmanager and gRPC API are reachable only in-cluster. The
+# baseline chain (origin lock, rate limit, headers) stays on.
+ingress:
+  pathPrefix: /webhook/github
+
+# BRIDGE_DATABASE_URL, BRIDGE_GITHUB_WEBHOOK_SECRET, BRIDGE_GITHUB_APP_ID,
+# BRIDGE_GITHUB_APP_PRIVATE_KEY, BRIDGE_ALERT_TOKEN, rendered by infra-bootstrap
+# gitops/bootstrap/ukubi-bridge-secret.yaml. Not optional: without the webhook
+# secret the bridge exits, and a CreateContainerConfigError names the cause
+# faster than a crash loop. Env is bound at start: restart after a rotation.
+envFrom:
+  - secretRef:
+      name: ukubi-bridge-config
+
+env:
+  # Logins whose PRs and comments may open threads.
+  - name: BRIDGE_TRUSTED_LOGINS
+    value: "MohammadBnei,renovate[bot]"
+  # Fleet agent logins (trusted, tagged actor=agent). Empty until agent-fleet
+  # has agent identities.
+  - name: BRIDGE_AGENT_LOGINS
+    value: ""
+
+livenessProbe:
+  enabled: true
+  path: /healthz
+readinessProbe:
+  enabled: true
+  path: /healthz
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# distroless static:nonroot runs as 65532. Nothing writes to disk.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
