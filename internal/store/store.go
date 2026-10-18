@@ -1,4 +1,4 @@
-// Package store is the bus's only door to Postgres (ADR-0059 §2).
+// Package store is the bus's only door to Postgres (ADR-0060 §2).
 package store
 
 import (

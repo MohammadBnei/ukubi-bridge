@@ -1,4 +1,4 @@
--- The bus log (ADR-0059 §2). Append-only, not partitioned, deleted by age.
+-- The bus log (ADR-0060 §2). Append-only, not partitioned, deleted by age.
 CREATE TABLE IF NOT EXISTS events (
     id           bigserial   PRIMARY KEY,
     source       text        NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (source, ce_id)
 );
 
--- One row per named subscriber (ADR-0059 §2). types are prefixes, subjects
+-- One row per named subscriber (ADR-0060 §2). types are prefixes, subjects
 -- globs; empty matches everything. attempts counts Nacks of the head event.
 CREATE TABLE IF NOT EXISTS subscriptions (
     name          text        PRIMARY KEY,

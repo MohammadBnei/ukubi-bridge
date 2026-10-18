@@ -1,5 +1,5 @@
 // Package event is the bus envelope: CloudEvents 1.0 attributes plus the
-// extensions ADR-0059 defines. The proto form (for the gRPC API) maps 1:1.
+// extensions ADR-0060 defines. The proto form (for the gRPC API) maps 1:1.
 package event
 
 import (

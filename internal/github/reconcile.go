@@ -28,7 +28,7 @@ import (
 const maxAttempts = 5
 
 // Reconciler redelivers App webhook deliveries missing from the log, failed or
-// acknowledged: bridge downtime, or an event lost to a Pigsty failover (ADR-0059 §5).
+// acknowledged: bridge downtime, or an event lost to a Pigsty failover (ADR-0060 §5).
 type Reconciler struct {
 	API      string // "https://api.github.com"
 	AppID    string
