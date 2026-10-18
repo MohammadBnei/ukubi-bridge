@@ -20,10 +20,11 @@ import (
 	"time"
 )
 
-// maxAttempts caps redelivery of a GUID the bridge rejected as unusable (400 on
-// every attempt), so it is not retried every run for the whole lookback. Any
-// other failure (0, 401, 403, 5xx) retries until it leaves the window: those
-// are outages, which is what the loop is for.
+// maxAttempts caps the deliveries of one GUID in the window, whatever their
+// status: each redelivery is itself a new delivery in the window, so without a
+// cap a GUID that keeps failing never leaves it and is redelivered every run.
+// ponytail: at a 10-minute tick that gives up ~40 minutes after the first
+// failure; a longer outage needs a manual redelivery.
 const maxAttempts = 5
 
 // Reconciler redelivers App webhook deliveries missing from the log, failed or
@@ -80,6 +81,7 @@ type delivery struct {
 	GUID        string    `json:"guid"`
 	DeliveredAt time.Time `json:"delivered_at"`
 	StatusCode  int       `json:"status_code"`
+	Redelivery  bool      `json:"redelivery"`
 }
 
 var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
@@ -142,37 +144,19 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 		}
 	}
 
-	// Candidates: every GUID not deliberately ignored. A 202 is checked too: it
-	// can be lost to an async failover after the bridge acknowledged it.
-	var failed []string
-	for _, guid := range order {
-		ignored, rejected := false, true
-		for _, d := range attempts[guid] {
-			ignored = ignored || d.StatusCode == http.StatusNoContent
-			rejected = rejected && d.StatusCode == http.StatusBadRequest
-		}
-		if ignored {
-			continue // check_run etc.: never in the log by design
-		}
-		if rejected && len(attempts[guid]) >= maxAttempts {
-			slog.Warn("reconcile: giving up on delivery", "guid", guid, "attempts", len(attempts[guid]), "status", 400)
-			continue
-		}
-		failed = append(failed, guid)
-	}
-	if len(failed) == 0 {
+	failed, givenUp := pick(attempts, order)
+	if len(failed)+len(givenUp) == 0 {
 		return 0, nil
 	}
-	// Oldest first, by original delivery, so a missed opened lands before its closed.
-	// ponytail: best effort only; GitHub redelivers asynchronously.
-	first := func(g string) delivery { a := attempts[g]; return a[len(a)-1] }
-	slices.SortStableFunc(failed, func(a, b string) int {
-		return first(a).DeliveredAt.Compare(first(b).DeliveredAt)
-	})
 	// A failed status can still have landed (the store wrote, the response was lost).
-	known, err := r.Known(ctx, failed)
+	known, err := r.Known(ctx, slices.Concat(failed, givenUp))
 	if err != nil {
 		return 0, err
+	}
+	for _, guid := range givenUp {
+		if !known[guid] {
+			slog.Warn("reconcile: giving up on delivery", "guid", guid, "attempts", len(attempts[guid]))
+		}
 	}
 	n := 0
 	for _, guid := range failed {
@@ -194,6 +178,32 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// pick splits the GUIDs seen in the window (attempts newest first, order as
+// listed) into ones to redeliver, oldest original first, and ones given up on.
+// A 202 is a candidate too: it can be lost to an async failover after the
+// bridge acknowledged it.
+func pick(attempts map[string][]delivery, order []string) (redeliver, givenUp []string) {
+	for _, guid := range order {
+		a := attempts[guid]
+		if slices.ContainsFunc(a, func(d delivery) bool { return d.StatusCode == http.StatusNoContent }) {
+			continue // check_run etc.: never in the log by design
+		}
+		// Only redeliveries left: the original fell out of the window.
+		if len(a) >= maxAttempts || !slices.ContainsFunc(a, func(d delivery) bool { return !d.Redelivery }) {
+			givenUp = append(givenUp, guid)
+			continue
+		}
+		redeliver = append(redeliver, guid)
+	}
+	// Oldest first, by original delivery, so a missed opened lands before its closed.
+	// ponytail: best effort only; GitHub redelivers asynchronously.
+	first := func(g string) delivery { a := attempts[g]; return a[len(a)-1] }
+	slices.SortStableFunc(redeliver, func(a, b string) int {
+		return first(a).DeliveredAt.Compare(first(b).DeliveredAt)
+	})
+	return redeliver, givenUp
 }
 
 // Loop runs every interval until ctx ends, starting now.

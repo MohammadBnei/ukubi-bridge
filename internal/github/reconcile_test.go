@@ -149,18 +149,13 @@ func TestReconcileRedeliversOnlyMissing(t *testing.T) {
 	for i := range maxAttempts {
 		pages[0] = append(pages[0], d(int64(40+i), "hopeless", time.Duration(6+i)*time.Minute, 400, now))
 	}
-	// An ingress outage longer than the 400 cap: still redelivered.
-	for i := range maxAttempts + 1 {
-		pages[0] = append(pages[0], d(int64(60+i), "outage", time.Duration(12+i)*time.Minute, 502, now))
-	}
 	r, gh := setup(t, pages, "")
 	n, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Oldest original delivery first.
-	want := []string{"/app/hook/deliveries/21/attempts", "/app/hook/deliveries/60/attempts",
-		"/app/hook/deliveries/50/attempts", "/app/hook/deliveries/14/attempts", "/app/hook/deliveries/10/attempts"}
+	want := []string{"/app/hook/deliveries/21/attempts", "/app/hook/deliveries/50/attempts", "/app/hook/deliveries/14/attempts", "/app/hook/deliveries/10/attempts"}
 	if n != len(want) || !slices.Equal(gh.posted, want) {
 		t.Fatalf("redelivered %d %v, want %v", n, gh.posted, want)
 	}
@@ -182,5 +177,27 @@ func TestReconcileStopsOnRateLimit(t *testing.T) {
 	r, _ = setup(t, pages, "/app/hook/deliveries")
 	if _, err := r.Run(context.Background(), now); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("list: err=%v, want ErrRateLimited", err)
+	}
+}
+
+func TestPickCapsEveryStatus(t *testing.T) {
+	now := time.Now()
+	at := func(ago time.Duration, status int, redelivery bool) delivery {
+		return delivery{DeliveredAt: now.Add(-ago), StatusCode: status, Redelivery: redelivery}
+	}
+	var outage []delivery // newest first: four redeliveries of a 502, then the original
+	for i := range maxAttempts - 1 {
+		outage = append(outage, at(time.Duration(i)*time.Minute, 502, true))
+	}
+	attempts := map[string][]delivery{
+		"retry":    {at(time.Minute, 502, true), at(time.Hour, 202, false)},
+		"fresh":    {at(2*time.Minute, 0, false)},
+		"outage":   append(slices.Clone(outage), at(5*time.Hour, 502, false)), // maxAttempts: give up
+		"orphaned": outage,                                                    // original left the window
+		"ignored":  {at(time.Minute, 204, false)},
+	}
+	redeliver, givenUp := pick(attempts, []string{"fresh", "retry", "outage", "orphaned", "ignored"})
+	if !slices.Equal(redeliver, []string{"retry", "fresh"}) || !slices.Equal(givenUp, []string{"outage", "orphaned"}) {
+		t.Fatalf("redeliver %v, given up %v", redeliver, givenUp)
 	}
 }
