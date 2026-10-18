@@ -36,7 +36,7 @@ type Policy struct {
 }
 
 // allowed lists the accepted event/action pairs. check_run, status and push
-// fan out per commit and would wake agents in a loop (ADR-0059 §5).
+// fan out per commit and would wake agents in a loop (ADR-0060 §5).
 var allowed = map[string]map[string]bool{
 	"pull_request":        {"opened": true, "synchronize": true, "closed": true, "reopened": true},
 	"issue_comment":       {"created": true},
@@ -122,7 +122,7 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 	}
 
 	trusted := p.Trusted[actor.Login]
-	// A PR from a fork is never trusted, whoever opened it (ADR-0059 §6).
+	// A PR from a fork is never trusted, whoever opened it (ADR-0060 §6).
 	if pl.PullRequest != nil {
 		head := pl.PullRequest.Head.Repo
 		if head == nil || head.FullName != pl.Repository.FullName {

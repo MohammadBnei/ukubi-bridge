@@ -2,7 +2,7 @@
 
 The event bus of the `ukubi-cluster` homelab: a Postgres-backed CloudEvents log
 that feeds agent-fleet's agents and, later, apps. The design is
-[infra-bootstrap ADR-0059](https://github.com/MohammadBnei/infra-bootstrap/blob/main/docs/adr/0059-event-bridge.md);
+[infra-bootstrap ADR-0060](https://github.com/MohammadBnei/infra-bootstrap/blob/main/docs/adr/0060-event-bridge.md);
 agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated executor).
 
 ## What it does today

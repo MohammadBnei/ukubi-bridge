@@ -3,7 +3,7 @@
 # which also sets ingress.hostname: events.bnei.dev. Modelled on mountain's.
 
 # One writer to the events log and one LISTEN connection: never two pods, never
-# a rolling overlap (ADR-0059 Decision 1).
+# a rolling overlap (ADR-0060 Decision 1).
 replicaCount: 1
 strategy:
   type: Recreate

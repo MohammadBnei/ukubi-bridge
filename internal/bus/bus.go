@@ -1,4 +1,4 @@
-// Package bus serves the BridgeService API (infra-bootstrap ADR-0059 §2, §4):
+// Package bus serves the BridgeService API (infra-bootstrap ADR-0060 §2, §4):
 // Publish, head-of-line Subscribe with Ack/Nack, and Replay.
 package bus
 
@@ -34,7 +34,7 @@ var (
 )
 
 // Client is one BRIDGE_CLIENTS entry.
-// ponytail: static clients from env; ADR-0059 §8's TokenReview + namespace
+// ponytail: static clients from env; ADR-0060 §8's TokenReview + namespace
 // allowlist replaces this when apps subscribe.
 type Client struct {
 	Name         string   `json:"-"`

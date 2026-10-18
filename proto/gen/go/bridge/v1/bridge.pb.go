@@ -23,7 +23,7 @@ const (
 )
 
 // CloudEvent is internal/event.Event on the wire, field for field
-// (infra-bootstrap ADR-0059 §3).
+// (infra-bootstrap ADR-0060 §3).
 type CloudEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Bridge-assigned log position. Ack, Nack and Replay take it. Ignored on Publish.

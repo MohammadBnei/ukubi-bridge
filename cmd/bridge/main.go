@@ -1,5 +1,5 @@
 // Command bridge ingests webhooks into the ukubi event bus and serves its
-// BridgeService API (infra-bootstrap ADR-0059).
+// BridgeService API (infra-bootstrap ADR-0060).
 package main
 
 import (
