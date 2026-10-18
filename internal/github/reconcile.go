@@ -16,15 +16,18 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"time"
 )
 
-// maxAttempts caps deliveries per GUID in the window, so a delivery the bridge
-// rejects for good (400) is not redelivered every run for the whole lookback.
+// maxAttempts caps redelivery of a GUID the bridge rejected as unusable (400 on
+// every attempt), so it is not retried every run for the whole lookback. Any
+// other failure (0, 401, 403, 5xx) retries until it leaves the window: those
+// are outages, which is what the loop is for.
 const maxAttempts = 5
 
-// Reconciler redelivers App webhook deliveries that failed and never reached
-// the log: bridge downtime, or an event lost to a Pigsty failover (ADR-0059 §5).
+// Reconciler redelivers App webhook deliveries missing from the log, failed or
+// acknowledged: bridge downtime, or an event lost to a Pigsty failover (ADR-0059 §5).
 type Reconciler struct {
 	API      string // "https://api.github.com"
 	AppID    string
@@ -139,18 +142,20 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 		}
 	}
 
+	// Candidates: every GUID not deliberately ignored. A 202 is checked too: it
+	// can be lost to an async failover after the bridge acknowledged it.
 	var failed []string
 	for _, guid := range order {
-		ok := false
+		ignored, rejected := false, true
 		for _, d := range attempts[guid] {
-			ok = ok || d.StatusCode >= 200 && d.StatusCode < 300
+			ignored = ignored || d.StatusCode == http.StatusNoContent
+			rejected = rejected && d.StatusCode == http.StatusBadRequest
 		}
-		if ok {
-			continue // accepted, or ignored with a 204
+		if ignored {
+			continue // check_run etc.: never in the log by design
 		}
-		if len(attempts[guid]) >= maxAttempts {
-			slog.Warn("reconcile: giving up on delivery", "guid", guid, "attempts", len(attempts[guid]),
-				"status", attempts[guid][0].StatusCode)
+		if rejected && len(attempts[guid]) >= maxAttempts {
+			slog.Warn("reconcile: giving up on delivery", "guid", guid, "attempts", len(attempts[guid]), "status", 400)
 			continue
 		}
 		failed = append(failed, guid)
@@ -158,6 +163,12 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 	if len(failed) == 0 {
 		return 0, nil
 	}
+	// Oldest first, by original delivery, so a missed opened lands before its closed.
+	// ponytail: best effort only; GitHub redelivers asynchronously.
+	first := func(g string) delivery { a := attempts[g]; return a[len(a)-1] }
+	slices.SortStableFunc(failed, func(a, b string) int {
+		return first(a).DeliveredAt.Compare(first(b).DeliveredAt)
+	})
 	// A failed status can still have landed (the store wrote, the response was lost).
 	known, err := r.Known(ctx, failed)
 	if err != nil {

@@ -113,7 +113,7 @@ func setup(t *testing.T, pages [][]map[string]any, limitOn string) (*Reconciler,
 	gh := &fakeGitHub{t: t, pub: &key.PublicKey, now: now, pages: pages, limitOn: limitOn}
 	srv := httptest.NewServer(gh)
 	t.Cleanup(srv.Close)
-	known := map[string]bool{"in-log": true}
+	known := map[string]bool{"in-log": true, "ok": true, "retried-ok": true}
 	return &Reconciler{
 		API: srv.URL, AppID: "12345", Key: k, Lookback: 6 * time.Hour, Client: srv.Client(),
 		Known: func(_ context.Context, guids []string) (map[string]bool, error) {
@@ -126,21 +126,22 @@ func setup(t *testing.T, pages [][]map[string]any, limitOn string) (*Reconciler,
 	}, gh
 }
 
-func TestReconcileRedeliversOnlyMissingFailed(t *testing.T) {
+func TestReconcileRedeliversOnlyMissing(t *testing.T) {
 	now := time.Now()
 	pages := [][]map[string]any{
 		{
 			d(10, "missing", time.Minute, 503, now),      // bridge down: redeliver
 			d(11, "in-log", 2*time.Minute, 503, now),     // failed but landed: skip
-			d(12, "ok", 3*time.Minute, 202, now),         // accepted: skip
+			d(12, "ok", 3*time.Minute, 202, now),         // accepted and in the log: skip
 			d(13, "retried-ok", 4*time.Minute, 202, now), // a later redelivery succeeded...
 			d(14, "conn-refused", 5*time.Minute, 0, now), // no response at all: redeliver
 			d(15, "ignored", 6*time.Minute, 204, now),    // check_run etc.: skip
+			d(50, "lost", 11*time.Minute, 202, now),      // acknowledged, then lost to a failover: redeliver
 		},
 		{
 			d(20, "retried-ok", 2*time.Hour, 502, now), // ...so this failure is settled
 			d(21, "missing-2", 3*time.Hour, 500, now),  // second page: redeliver (latest id)
-			d(22, "missing-2", 3*time.Hour, 500, now),
+			d(22, "missing-2", 3*time.Hour+10*time.Minute, 500, now),
 			d(23, "too-old", 7*time.Hour, 500, now), // before the window: stop paging here
 		},
 		{d(30, "never-reached", 8*time.Hour, 500, now)},
@@ -148,13 +149,19 @@ func TestReconcileRedeliversOnlyMissingFailed(t *testing.T) {
 	for i := range maxAttempts {
 		pages[0] = append(pages[0], d(int64(40+i), "hopeless", time.Duration(6+i)*time.Minute, 400, now))
 	}
+	// An ingress outage longer than the 400 cap: still redelivered.
+	for i := range maxAttempts + 1 {
+		pages[0] = append(pages[0], d(int64(60+i), "outage", time.Duration(12+i)*time.Minute, 502, now))
+	}
 	r, gh := setup(t, pages, "")
 	n, err := r.Run(context.Background(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/app/hook/deliveries/10/attempts", "/app/hook/deliveries/14/attempts", "/app/hook/deliveries/21/attempts"}
-	if n != 3 || !slices.Equal(gh.posted, want) {
+	// Oldest original delivery first.
+	want := []string{"/app/hook/deliveries/21/attempts", "/app/hook/deliveries/60/attempts",
+		"/app/hook/deliveries/50/attempts", "/app/hook/deliveries/14/attempts", "/app/hook/deliveries/10/attempts"}
+	if n != len(want) || !slices.Equal(gh.posted, want) {
 		t.Fatalf("redelivered %d %v, want %v", n, gh.posted, want)
 	}
 	if gh.lists != 2 {

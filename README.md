@@ -14,10 +14,11 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   Trust follows the PR or comment author, never the webhook sender; a fork PR is
   never trusted.
 - GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
-  to the lookback window and redelivers each one that failed (non-2xx) and is
-  not in `events` — bridge downtime, or an event lost to a Pigsty failover.
-  A GUID with 5 failed attempts in the window is given up on (a 400 stays a
-  400). A 403/429 ends the run; the next tick tries again.
+  to the lookback window and redelivers, oldest first, each one not in
+  `events` — failed (bridge downtime) or acknowledged with 202 (lost to a
+  Pigsty failover). A 204 (ignored type) is never checked. A GUID answered 400
+  on 5 attempts is given up on (a 400 stays a 400); any other failure retries
+  until it leaves the window. A 403/429 ends the run; the next tick tries again.
 - `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
   one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
   `repeat_interval` resend of the same firing coalesces while its resolution
