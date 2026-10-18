@@ -2,6 +2,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -43,6 +44,10 @@ func (s *Store) Close() { s.db.Close() }
 // Insert appends e to the log. It returns false, nil when (source, ce_id) is
 // already there: a redelivery is not an error.
 func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
+	// jsonb rejects \u0000, which would turn a permanent payload problem into
+	// an endless 503/redelivery loop.
+	// ponytail: also rewrites an escaped backslash followed by "u0000"; accepted.
+	e.Data = bytes.ReplaceAll(e.Data, []byte(`\u0000`), []byte(`\ufffd`))
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return false, err

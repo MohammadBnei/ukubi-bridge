@@ -67,6 +67,7 @@ type payload struct {
 	} `json:"pull_request"`
 	Issue *struct {
 		Number      int       `json:"number"`
+		User        user      `json:"user"`
 		PullRequest *struct{} `json:"pull_request"`
 	} `json:"issue"`
 	Comment *struct {
@@ -127,6 +128,12 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 		if head == nil || head.FullName != pl.Repository.FullName {
 			trusted = false
 		}
+	}
+	// A comment carries no head repo, so the fork check above cannot run.
+	// Fail closed: the issue/PR author must be trusted too, so a trusted
+	// login commenting never makes an outsider's thread trusted.
+	if kind == "issue_comment" && !p.Trusted[pl.Issue.User.Login] {
+		trusted = false
 	}
 
 	return event.Event{

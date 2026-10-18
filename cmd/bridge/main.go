@@ -49,7 +49,9 @@ func main() {
 		port = "8080"
 	}
 	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -60,6 +62,9 @@ func main() {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}
+	// ListenAndServe returns as soon as Shutdown starts; wait for in-flight
+	// handlers before the deferred st.Close.
+	<-shutdownDone
 }
 
 func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Handler {
