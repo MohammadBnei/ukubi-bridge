@@ -13,6 +13,19 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   `internal/event`, appended to `events` once per `X-GitHub-Delivery`.
   Trust follows the PR or comment author, never the webhook sender; a fork PR is
   never trusted.
+- GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
+  to the lookback window and redelivers, oldest first, each one not in
+  `events` — failed (bridge downtime) or acknowledged with 202 (lost to a
+  Pigsty failover). A 204 (ignored type) is never checked. A GUID the bridge
+  rejected (4xx) 5 times, or whose original delivery has left the 6-hour
+  window, is given up on and logged. An outage (5xx, timeout) is retried until
+  then, so an outage longer than 6 hours needs a manual redelivery. A 403/429 ends the run; the next tick tries again.
+- `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
+  one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
+  `repeat_interval` resend of the same firing coalesces while its resolution
+  is a new event. Type `dev.bnei.alert.firing|resolved`, subject
+  `alert/<fingerprint>`, `actor=machine`, never trusted. 503 when the store is
+  down, so the sender retries.
 - `GET /healthz`.
 - `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
   `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is
@@ -44,8 +57,7 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `(source, id)` (or `seq`, which is the same event's log position) — never
     on `id` alone: two clients can both publish id `1`.
 
-Not yet: the GitHub reconcile loop, Alertmanager/Grafana ingest, an API for
-dead letters.
+Not yet: an API for dead letters.
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
 done here: the bridge has no thread ownership, so core's dispatcher drops them
 and the per-thread agent-wake cap bounds loops.
@@ -71,6 +83,10 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins that may open threads (operator, `renovate[bot]`, CI). |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Trusted, and tagged `actor=agent`. |
 | `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes, `publish_subjects` subject prefixes (`""` allows any; an app gets its own, e.g. `["zot/"]`). Missing either: that client publishes nothing. Empty: every call is refused. |
+| `BRIDGE_GITHUB_APP_ID` | App id, for the reconcile loop. Unset (or no key): reconcile is off, with a warning. |
+| `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
+| `BRIDGE_RECONCILE_LOOKBACK` | Go duration, default `6h`. Keep event retention longer than this. |
+| `BRIDGE_ALERT_TOKEN` | Bearer token Alertmanager and Grafana send. Unset: both alert endpoints answer 503. |
 | `PORT` | Default `8080`. |
 
 ## Tests

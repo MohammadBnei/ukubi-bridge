@@ -42,3 +42,6 @@ CREATE TABLE IF NOT EXISTS dead_letters (
     PRIMARY KEY (subscription, event_id)
 );
 CREATE INDEX IF NOT EXISTS dead_letters_parked ON dead_letters (subscription, subject) WHERE cleared_at IS NULL;
+
+-- The GitHub reconcile loop looks deliveries up by GUID alone.
+CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
