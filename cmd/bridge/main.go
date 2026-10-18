@@ -1,4 +1,5 @@
-// Command bridge ingests webhooks into the ukubi event bus (infra-bootstrap ADR-0059).
+// Command bridge ingests webhooks into the ukubi event bus and serves its
+// BridgeService API (infra-bootstrap ADR-0059).
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
@@ -24,6 +26,11 @@ func main() {
 	secret := os.Getenv("BRIDGE_GITHUB_WEBHOOK_SECRET")
 	if secret == "" {
 		slog.Error("BRIDGE_GITHUB_WEBHOOK_SECRET is required")
+		os.Exit(1)
+	}
+	clients, err := bus.ParseClients(os.Getenv("BRIDGE_CLIENTS"))
+	if err != nil {
+		slog.Error("clients", "err", err)
 		os.Exit(1)
 	}
 	st, err := store.Open(ctx, os.Getenv("BRIDGE_DATABASE_URL"))
@@ -43,12 +50,17 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
+	mux.Handle(bus.New(st, clients).Handler())
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
+	// alongside Connect and gRPC-Web.
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols)}
+	srv.Protocols.SetHTTP1(true)
+	srv.Protocols.SetUnencryptedHTTP2(true)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)

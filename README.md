@@ -14,9 +14,44 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   Trust follows the PR or comment author, never the webhook sender; a fork PR is
   never trusted.
 - `GET /healthz`.
+- `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
+  `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is
+  scoped to the webhook path.
+  - `Publish` — appends one event, deduplicated on `(source, id)`. The source
+    is always `client/<name>`. A non-privileged client's event is stamped with
+    its own `kind` as actor and its name as `actor_login`, `trusted=false`, no
+    `owner`, and `hops` one above what it sent (`causation_id` kept). Only a
+    `privileged` client (agent-fleet core) sets actor, trust, owner and hops.
+    Nobody sets `replayed`.
+  - `Subscribe(name, types, subjects)` — `name` is the client's own name or
+    `<name>/<suffix>`. A new subscription starts at the head of the log.
+    Delivery is head-of-line: the next matching event is sent only once the
+    current one is acked. A NOTIFY sent inside each insert wakes the stream;
+    it also polls every 30 s. A second `Subscribe` on the same name replaces
+    the first.
+  - `Ack(subscription, seq)` / `Nack(subscription, seq, reason)` — only the
+    event in flight. A Nack retries after 1 s, 2 s, 4 s, 8 s; the fifth
+    dead-letters it, which **parks its subject** for that subscription: later
+    events on the subject go straight to `dead_letters` too, so a thread is
+    never processed out of order.
+  - `Replay(subscription, from_seq)` — streams the subscription's matching
+    events from `from_seq` to the current head with `replayed=true`. No ack,
+    no cursor change, nothing written. Subscribers must be idempotent on `seq`.
 
-Not yet: the `Publish`/`Subscribe`/`Ack`/`Replay` gRPC API, the GitHub
-reconcile loop, Alertmanager/Grafana ingest.
+Not yet: the GitHub reconcile loop, Alertmanager/Grafana ingest, an API for
+dead letters.
+
+### Unparking a subject
+
+Nothing exposes this yet. Fix the subscriber, then:
+
+```sql
+UPDATE dead_letters SET cleared_at = now()
+WHERE subscription = 'core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;
+```
+
+The dead-lettered events stay behind the cursor; `Replay` from the first one's
+`event_id` re-sends them.
 
 ## Configuration
 
@@ -26,6 +61,7 @@ reconcile loop, Alertmanager/Grafana ingest.
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins that may open threads (operator, `renovate[bot]`, CI). |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Trusted, and tagged `actor=agent`. |
+| `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes. Empty: every call is refused. |
 | `PORT` | Default `8080`. |
 
 ## Tests
@@ -37,4 +73,17 @@ BRIDGE_TEST_DATABASE_URL=postgres://postgres:t@localhost:55432/postgres go test 
 ```
 
 `TestInsertCommitOrder` fails without the insert advisory lock: concurrent
-inserts commit out of id order and a cursor skips rows.
+inserts commit out of id order and a cursor skips rows. The `internal/bus`
+tests run in their own database (`bridge_bus_test`, recreated each run) with
+the poll fallback set to an hour, so they also prove the NOTIFY path.
+`TestNackDeadLetterParksSubject` fails if parking is removed: the second event
+on the poisoned subject is delivered instead of parked.
+
+## Regenerating the API code
+
+The generated Go is committed. From `proto/`, with `protoc-gen-go` v1.36.12
+and `protoc-gen-connect-go` v1.21.0 on `PATH` (the versions agent-fleet uses):
+
+```sh
+buf lint && buf generate
+```

@@ -1,0 +1,11 @@
+# Go only, mirroring agent-fleet's proto/buf.gen.yaml. Run `buf generate` from
+# proto/ with protoc-gen-go v1.36.12 and protoc-gen-connect-go v1.21.0 on PATH;
+# the output is committed.
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-connect-go
+    out: gen/go
+    opt: paths=source_relative
