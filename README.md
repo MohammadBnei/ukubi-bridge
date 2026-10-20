@@ -80,8 +80,8 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 |---|---|
 | `BRIDGE_DATABASE_URL` | Postgres URL. The primary directly, not pgbouncer (LISTEN needs session mode). |
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
-| `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins that may open threads (operator, `renovate[bot]`, CI). |
-| `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Trusted, and tagged `actor=agent`. |
+| `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
+| `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |
 | `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes, `publish_subjects` subject prefixes (`""` allows any; an app gets its own, e.g. `["zot/"]`). Missing either: that client publishes nothing. Empty: every call is refused. |
 | `BRIDGE_GITHUB_APP_ID` | App id, for the reconcile loop. Unset (or no key): reconcile is off, with a warning. |
 | `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
