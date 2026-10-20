@@ -42,9 +42,9 @@ env:
   - name: BRIDGE_TRUSTED_LOGINS
     value: "MohammadBnei"
   # Fleet agent logins: tagged actor=agent, never trusted (github.Policy).
-  # Empty until the ukubi-fleet App exists (infra-bootstrap ADR-0062).
+  # The ukubi-fleet App's bot (App id 5395733, infra-bootstrap ADR-0062).
   - name: BRIDGE_AGENT_LOGINS
-    value: ""
+    value: "ukubi-fleet[bot]"
   # Under limits.memory (128Mi), so the GC works harder before the kernel
   # OOM-kills the pod. A soft limit: it does not cap the allocation itself.
   - name: GOMEMLIMIT
