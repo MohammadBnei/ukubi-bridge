@@ -40,9 +40,9 @@ envFrom:
 env:
   # Logins whose PRs and comments may open threads.
   - name: BRIDGE_TRUSTED_LOGINS
-    value: "MohammadBnei,renovate[bot]"
-  # Fleet agent logins (trusted, tagged actor=agent). Empty until agent-fleet
-  # has agent identities.
+    value: "MohammadBnei"
+  # Fleet agent logins: tagged actor=agent, never trusted (github.Policy).
+  # Empty until the ukubi-fleet App exists (infra-bootstrap ADR-0062).
   - name: BRIDGE_AGENT_LOGINS
     value: ""
   # Under limits.memory (128Mi), so the GC works harder before the kernel

@@ -31,8 +31,19 @@ func Verify(secret, body []byte, header string) bool {
 
 // Policy says who is trusted and who is a fleet agent. Logins are GitHub logins.
 type Policy struct {
-	Trusted map[string]bool // operator, renovate[bot], CI bots, fleet agents
-	Agents  map[string]bool // fleet agent identities (subset of Trusted)
+	Trusted map[string]bool // logins whose own actions may open threads: the operator, CI
+	// Agents are fleet agent identities, tagged actor=agent and never trusted:
+	// all agents share one GitHub identity, so a prompt-injected session
+	// acting through it would otherwise re-enter the bus as a clean, trusted
+	// event. Agent hand-offs that carry trust go through core PublishEvent.
+	Agents map[string]bool
+}
+
+// owns reports whether threads authored by login are the operator's own:
+// trusted logins, and the fleet agents working for the operator. Only a
+// trusted actor's event on such a thread is trusted.
+func (p Policy) owns(login string) bool {
+	return p.Trusted[login] || p.Agents[login]
 }
 
 // allowed lists the accepted event/action pairs. check_run, status and push
@@ -57,6 +68,7 @@ type repo struct {
 
 type payload struct {
 	Action      string `json:"action"`
+	Sender      user   `json:"sender"`
 	Repository  repo   `json:"repository"`
 	PullRequest *struct {
 		Number int  `json:"number"`
@@ -92,22 +104,27 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 		return event.Event{}, errors.New("missing repository or delivery id")
 	}
 
-	// The actor is whoever wrote the thing, never the webhook sender: CI or
-	// the App itself can be the sender of an event an outsider caused.
-	var actor user
+	// The actor is whoever wrote the thing, and author is whoever owns the
+	// thread. A PR's opened event is the author's; synchronize, closed and
+	// reopened are the sender's (the pusher, the closer): attributing a push
+	// to the PR author would let anyone with push access act as them.
+	var actor, author user
 	var subject string
 	switch kind {
 	case "pull_request":
 		if pl.PullRequest == nil {
 			return event.Event{}, errors.New("pull_request event without pull_request")
 		}
-		actor = pl.PullRequest.User
+		actor, author = pl.PullRequest.User, pl.PullRequest.User
+		if pl.Action != "opened" {
+			actor = pl.Sender
+		}
 		subject = fmt.Sprintf("github/%s/pr/%d", pl.Repository.FullName, pl.PullRequest.Number)
 	case "issue_comment":
 		if pl.Issue == nil || pl.Comment == nil {
 			return event.Event{}, errors.New("issue_comment without issue or comment")
 		}
-		actor = pl.Comment.User
+		actor, author = pl.Comment.User, pl.Issue.User
 		thread := "issue"
 		if pl.Issue.PullRequest != nil {
 			thread = "pr"
@@ -117,23 +134,20 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 		if pl.PullRequest == nil || pl.Review == nil {
 			return event.Event{}, errors.New("pull_request_review without pull_request or review")
 		}
-		actor = pl.Review.User
+		actor, author = pl.Review.User, pl.PullRequest.User
 		subject = fmt.Sprintf("github/%s/pr/%d", pl.Repository.FullName, pl.PullRequest.Number)
 	}
 
-	trusted := p.Trusted[actor.Login]
+	// Both are needed: a trusted login acting on an outsider's thread must
+	// not adopt it, and an outsider acting on the operator's thread is not
+	// the operator. An empty login (no sender) is never trusted.
+	trusted := p.Trusted[actor.Login] && p.owns(author.Login)
 	// A PR from a fork is never trusted, whoever opened it (ADR-0060 §6).
 	if pl.PullRequest != nil {
 		head := pl.PullRequest.Head.Repo
 		if head == nil || head.FullName != pl.Repository.FullName {
 			trusted = false
 		}
-	}
-	// A comment carries no head repo, so the fork check above cannot run.
-	// Fail closed: the issue/PR author must be trusted too, so a trusted
-	// login commenting never makes an outsider's thread trusted.
-	if kind == "issue_comment" && !p.Trusted[pl.Issue.User.Login] {
-		trusted = false
 	}
 
 	return event.Event{

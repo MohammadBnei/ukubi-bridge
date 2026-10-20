@@ -41,12 +41,8 @@ func main() {
 	}
 	defer st.Close()
 
-	agents := set(os.Getenv("BRIDGE_AGENT_LOGINS"))
-	trusted := set(os.Getenv("BRIDGE_TRUSTED_LOGINS"))
-	for a := range agents {
-		trusted[a] = true
-	}
-	policy := github.Policy{Trusted: trusted, Agents: agents}
+	// Agents are never added to trusted: see github.Policy.
+	policy := github.Policy{Trusted: set(os.Getenv("BRIDGE_TRUSTED_LOGINS")), Agents: set(os.Getenv("BRIDGE_AGENT_LOGINS"))}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })

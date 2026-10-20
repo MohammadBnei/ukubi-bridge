@@ -13,8 +13,8 @@ import (
 )
 
 var policy = Policy{
-	Trusted: map[string]bool{"MohammadBnei": true, "renovate[bot]": true, "ukubi-fleet": true},
-	Agents:  map[string]bool{"ukubi-fleet": true},
+	Trusted: map[string]bool{"MohammadBnei": true},
+	Agents:  map[string]bool{"ukubi-fleet[bot]": true},
 }
 
 func sign(secret, body string) string {
@@ -36,8 +36,12 @@ func TestVerify(t *testing.T) {
 }
 
 func pr(sender, author, typ, head string) []byte {
-	return []byte(fmt.Sprintf(`{"action":"opened","sender":{"login":%q},"repository":{"full_name":"MohammadBnei/editable-blog"},
-"pull_request":{"number":42,"user":{"login":%q,"type":%q},"head":{"repo":{"full_name":%q}}}}`, sender, author, typ, head))
+	return prAction("opened", sender, author, typ, head)
+}
+
+func prAction(action, sender, author, typ, head string) []byte {
+	return []byte(fmt.Sprintf(`{"action":%q,"sender":{"login":%q},"repository":{"full_name":"MohammadBnei/editable-blog"},
+"pull_request":{"number":42,"user":{"login":%q,"type":%q},"head":{"repo":{"full_name":%q}}}}`, action, sender, author, typ, head))
 }
 
 func TestNormalizeTrust(t *testing.T) {
@@ -49,8 +53,10 @@ func TestNormalizeTrust(t *testing.T) {
 		actor   string
 	}{
 		{"operator PR", pr("MohammadBnei", "MohammadBnei", "User", home), true, event.ActorHuman},
-		{"renovate PR", pr("renovate[bot]", "renovate[bot]", "Bot", home), true, event.ActorBot},
-		{"fleet agent PR", pr("ukubi-fleet", "ukubi-fleet", "User", home), true, event.ActorAgent},
+		// Release notes in a Renovate body are third-party text.
+		{"renovate PR", pr("renovate[bot]", "renovate[bot]", "Bot", home), false, event.ActorBot},
+		// Agents share one identity: their events are never trusted.
+		{"fleet agent PR", pr("ukubi-fleet[bot]", "ukubi-fleet[bot]", "Bot", home), false, event.ActorAgent},
 		{"outsider PR", pr("stranger", "stranger", "User", home), false, event.ActorHuman},
 		// Trust follows the author, not the sender.
 		{"outsider PR, trusted sender", pr("MohammadBnei", "stranger", "User", home), false, event.ActorHuman},
@@ -85,7 +91,11 @@ func TestNormalizeComment(t *testing.T) {
 		{"outsider on trusted PR", comment("stranger", "MohammadBnei"), false},
 		// Trust needs both: a trusted comment must not adopt an outsider's PR.
 		{"trusted on outsider PR", comment("MohammadBnei", "stranger"), false},
-		{"trusted on trusted PR", comment("MohammadBnei", "renovate[bot]"), true},
+		{"trusted on trusted PR", comment("MohammadBnei", "MohammadBnei"), true},
+		// The operator steering a fleet PR from GitHub stays trusted...
+		{"trusted on agent PR", comment("MohammadBnei", "ukubi-fleet[bot]"), true},
+		// ...but an agent's own comment never is.
+		{"agent on trusted PR", comment("ukubi-fleet[bot]", "MohammadBnei"), false},
 	}
 	for _, c := range cases {
 		e, err := Normalize(policy, "issue_comment", "d-2", c.body, time.Unix(0, 0))
@@ -94,6 +104,59 @@ func TestNormalizeComment(t *testing.T) {
 		}
 		if e.Subject != "github/MohammadBnei/editable-blog/pr/7" || e.Trusted != c.trusted {
 			t.Errorf("%s: subject=%s trusted=%v, want trusted=%v", c.name, e.Subject, e.Trusted, c.trusted)
+		}
+	}
+}
+
+// synchronize, closed and reopened are the sender's actions, not the author's.
+func TestNormalizePRActions(t *testing.T) {
+	const home = "MohammadBnei/editable-blog"
+	cases := []struct {
+		name    string
+		body    []byte
+		trusted bool
+		actor   string
+	}{
+		{"operator pushes own PR", prAction("synchronize", "MohammadBnei", "MohammadBnei", "User", home), true, event.ActorHuman},
+		{"agent pushes operator PR", prAction("synchronize", "ukubi-fleet[bot]", "MohammadBnei", "User", home), false, event.ActorAgent},
+		{"operator pushes agent PR", prAction("synchronize", "MohammadBnei", "ukubi-fleet[bot]", "Bot", home), true, event.ActorHuman},
+		{"outsider closes operator PR", prAction("closed", "stranger", "MohammadBnei", "User", home), false, event.ActorHuman},
+		{"no sender", prAction("reopened", "", "MohammadBnei", "User", home), false, event.ActorHuman},
+	}
+	for _, c := range cases {
+		e, err := Normalize(policy, "pull_request", "d-3", c.body, time.Unix(0, 0))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if e.Trusted != c.trusted || e.Actor != c.actor {
+			t.Errorf("%s: trusted=%v actor=%s, want %v %s", c.name, e.Trusted, e.Actor, c.trusted, c.actor)
+		}
+	}
+}
+
+func review(reviewer, author string) []byte {
+	return []byte(fmt.Sprintf(`{"action":"submitted","sender":{"login":%q},"repository":{"full_name":"MohammadBnei/editable-blog"},
+"pull_request":{"number":42,"user":{"login":%q},"head":{"repo":{"full_name":"MohammadBnei/editable-blog"}}},"review":{"user":{"login":%q}}}`, reviewer, author, reviewer))
+}
+
+// A review follows the comment rule: trusted reviewer on an owned PR.
+func TestNormalizeReview(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		body    []byte
+		trusted bool
+	}{
+		{"operator on own PR", review("MohammadBnei", "MohammadBnei"), true},
+		{"operator on agent PR", review("MohammadBnei", "ukubi-fleet[bot]"), true},
+		{"operator on outsider PR", review("MohammadBnei", "stranger"), false},
+		{"outsider on operator PR", review("stranger", "MohammadBnei"), false},
+	} {
+		e, err := Normalize(policy, "pull_request_review", "d-4", c.body, time.Unix(0, 0))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if e.Trusted != c.trusted {
+			t.Errorf("%s: trusted=%v, want %v", c.name, e.Trusted, c.trusted)
 		}
 	}
 }
