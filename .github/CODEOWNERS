@@ -1,0 +1,2 @@
+# Backs the ruleset's code-owner review: only the owner's approval satisfies it, so the fleet's GitHub App (which can submit reviews) cannot approve-and-merge a PR.
+* @MohammadBnei
