@@ -136,8 +136,10 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 		}
 		if err != nil {
 			// 503 so the delivery shows as failed in the App's delivery log.
-			// GitHub never retries on its own: until the reconcile loop exists,
-			// a manual redelivery from that log is the only recovery.
+			// GitHub never retries on its own: the reconcile loop redelivers it
+			// within BRIDGE_RECONCILE_LOOKBACK. With reconcile off (no App
+			// credentials) or past that window, a manual redelivery from that log
+			// is the only recovery.
 			slog.Error("github: store", "delivery", delivery, "err", err)
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return

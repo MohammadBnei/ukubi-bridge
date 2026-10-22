@@ -22,14 +22,16 @@ service:
   port: 8080
 
 # Public on ONE path. The chart's IngressRoute matches
-# Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz and the
-# future /webhook/alertmanager and gRPC API are reachable only in-cluster. The
-# baseline chain (origin lock, rate limit, headers) stays on.
+# Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz,
+# /webhook/alertmanager, /webhook/grafana and the BridgeService API are
+# reachable only in-cluster. The baseline chain (origin lock, rate limit,
+# headers) stays on.
 ingress:
   pathPrefix: /webhook/github
 
 # BRIDGE_DATABASE_URL, BRIDGE_GITHUB_WEBHOOK_SECRET, BRIDGE_GITHUB_APP_ID,
-# BRIDGE_GITHUB_APP_PRIVATE_KEY, BRIDGE_ALERT_TOKEN, rendered by infra-bootstrap
+# BRIDGE_GITHUB_APP_PRIVATE_KEY, BRIDGE_ALERT_TOKEN, BRIDGE_CLIENTS (empty:
+# every API call is refused), rendered by infra-bootstrap
 # gitops/bootstrap/ukubi-bridge-secret.yaml. Not optional: without the webhook
 # secret the bridge exits, and a CreateContainerConfigError names the cause
 # faster than a crash loop. Env is bound at start: restart after a rotation.

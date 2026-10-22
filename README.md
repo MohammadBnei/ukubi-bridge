@@ -57,10 +57,18 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `(source, id)` (or `seq`, which is the same event's log position) — never
     on `id` alone: two clients can both publish id `1`.
 
-Not yet: an API for dead letters.
+Not yet:
+
+- An API for dead letters.
+- Retention. No code deletes events; `events` grows until a pruning job is
+  written (`schema.sql` and `BRIDGE_RECONCILE_LOOKBACK` below assume one).
+- Any API client. agent-fleet's consumer (its ADR-0071) is "Accepted, not
+  built", and nothing else calls `Publish` or `Subscribe`. Events come in
+  only through the webhooks.
+
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
-done here: the bridge has no thread ownership, so core's dispatcher drops them
-and the per-thread agent-wake cap bounds loops.
+done here: the bridge has no thread ownership, so core's dispatcher is to drop
+them and the per-thread agent-wake cap to bound loops, once they are built.
 
 ### Unparking a subject
 
