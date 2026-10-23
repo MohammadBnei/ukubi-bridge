@@ -61,6 +61,8 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     dead-letters it, which **parks its subject** for that subscription: later
     events on the subject go straight to `dead_letters` too, so a thread is
     never processed out of order.
+  - `ConfirmGap(subscription, version)` — clears a gap once resynced (see
+    Retention).
   - `Replay(subscription, from_seq)` — streams the subscription's matching
     events from `from_seq` to the current head with `replayed=true`, after
     checking the stored filter still fits the client's rules (`NotFound` for a
@@ -68,7 +70,46 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `Subscribe`. No ack,
     no cursor change, nothing written. Subscribers must be idempotent on
     `(source, id)` (or `seq`, which is the same event's log position) — never
-    on `id` alone: two clients can both publish id `1`.
+    on `id` alone: two clients can both publish id `1`. From at or below the
+    retention watermark, the first message is a `gap` (see Retention).
+
+### Retention
+
+Every hour the bridge deletes events ingested more than `BRIDGE_RETENTION`
+ago (default 30 days), by `ingested_at`, never by the publisher's `time`
+(infra-bootstrap ADR-0066 §6). In the same transaction:
+
+- An event at or past an uncleared dead letter on its subject is **kept**, so
+  the operator can still unpark it and `Replay` it. A subscription that still
+  has to receive a kept event (its subject is parked for someone else) keeps
+  its cursor just before it.
+- Every other subscription behind the deleted range moves its cursor past it,
+  so a quiet subscription never falls behind.
+- A subscription that loses a matching event it never acked records a **gap**
+  (widened by later runs, never replaced). Its next `Subscribe` sends one
+  message carrying `gap {from_seq, to_seq, version}` before any event: resync
+  from your own source of truth, then call `ConfirmGap(subscription,
+  version)`. Its live stream ends
+  `Aborted`, so it reconnects to that gap (also when a run gaps it while it is
+  connecting). The gap is sent on every reconnect until confirmed; a run that
+  widens it bumps `version`, so confirming an older one is `FailedPrecondition`
+  (reconnect for the current one). Confirming twice is fine, also after the
+  stream ended (a resync may outlast a token); confirming a version no stream
+  was sent is refused. An Ack never moves a
+  cursor back. A stream replaced by a newer `Subscribe` on the same name ends
+  cleanly: do not reconnect on that.
+- A dead letter is never recorded for an event already deleted.
+- Each subject left parked for 3 days is logged once per run (`dead letter
+  uncleared`), and a failed run logs one `retention failed` line: the chart's
+  Loki rules alert on both.
+
+The run locks `dead_letters` for its duration, so an unparking `UPDATE` or a
+live dead-lettering waits for it. Clients written before gaps existed must
+handle a message whose `event` is unset (there are none yet: nothing calls the
+API before agent-fleet's dispatcher).
+
+Dedup on `(source, id)` holds only within retention: an id published again
+after its event was deleted is a new event.
 
 Not yet: an API for dead letters.
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
@@ -77,15 +118,27 @@ and the per-thread agent-wake cap bounds loops.
 
 ### Unparking a subject
 
-Nothing exposes this yet. Fix the subscriber, then:
+Nothing exposes this yet. Retention keeps parked events only while their dead
+letters are uncleared, and new events on the subject keep parking until it is
+unparked, so work in rounds. Fix the subscriber, then:
 
-```sql
-UPDATE dead_letters SET cleared_at = now()
-WHERE subscription = 'core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;
-```
+1. Note the subject's uncleared dead letters:
+   `SELECT min(event_id), max(event_id) FROM dead_letters WHERE subscription = 'bridge-core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;`
+2. `Replay` from that `min`, and let the subscriber handle the events up to
+   that `max` (idempotent on `(source, id)`). If the parked events are older
+   than the watermark, Replay's first message is a `gap`: here it only says
+   other events in that range may be gone; the parked ones follow.
+3. Clear only what was replayed:
 
-The dead-lettered events stay behind the cursor; `Replay` from the first one's
-`event_id` re-sends them.
+   ```sql
+   UPDATE dead_letters SET cleared_at = now()
+   WHERE subscription = 'bridge-core' AND subject = 'github/MohammadBnei/editable-blog/pr/42'
+     AND cleared_at IS NULL AND event_id <= <max from step 1>;
+   ```
+4. Repeat from 1 until step 1 finds nothing: events that parked during the
+   round are still uncleared, so they are neither lost nor deleted.
+
+Once cleared, the next retention run deletes those events if they are old.
 
 ## Configuration
 
@@ -103,6 +156,7 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 | `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
 | `BRIDGE_RECONCILE_LOOKBACK` | Go duration, default `6h`. Keep event retention longer than this. |
 | `BRIDGE_ALERT_TOKEN` | Bearer token Alertmanager and Grafana send. Unset: both alert endpoints answer 503. |
+| `BRIDGE_RETENTION` | Go duration, default `720h` (30 days), at least `24h`. Keep it longer than `BRIDGE_RECONCILE_LOOKBACK` and than the longest consumer outage you accept. |
 | `PORT` | Default `8080`. |
 
 ## Tests

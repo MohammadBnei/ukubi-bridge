@@ -45,3 +45,39 @@ CREATE INDEX IF NOT EXISTS dead_letters_parked ON dead_letters (subscription, su
 
 -- The GitHub reconcile loop looks deliveries up by GUID alone.
 CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
+
+-- Retention (infra-bootstrap ADR-0066 §6). A deletion run records a gap on a
+-- subscription that lost matching events it never acked; Subscribe sends it
+-- first, and the subscriber's ConfirmGap (with gap_ver) clears it.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_from bigint;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_to   bigint;
+-- Bumped whenever a run records or widens the gap: only a confirmation of the
+-- current version clears it.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_ver  bigint NOT NULL DEFAULT 0;
+UPDATE subscriptions SET gap_ver = 1 WHERE gap_from IS NOT NULL AND gap_ver = 0; -- versions start at 1
+
+-- One row: the log position deleted through. Replay from at or below it
+-- starts with a gap.
+CREATE TABLE IF NOT EXISTS retention (
+    one             boolean PRIMARY KEY DEFAULT true CHECK (one),
+    deleted_through bigint  NOT NULL DEFAULT 0
+);
+INSERT INTO retention DEFAULT VALUES ON CONFLICT DO NOTHING;
+
+-- Deletion picks its cutoff by ingested_at, the bridge's own clock: an event's
+-- time is the publisher's claim.
+CREATE INDEX IF NOT EXISTS events_ingested_at ON events (ingested_at);
+
+-- The subscription filter, shared by delivery and retention so both agree on
+-- what a subscription sees. types are prefixes, subjects globs (* and ?);
+-- empty matches everything.
+CREATE OR REPLACE FUNCTION bridge_matches(types text[], subjects text[], t text, s text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT (cardinality(types) = 0 OR EXISTS (SELECT 1 FROM unnest(types) p WHERE starts_with(t, p)))
+       -- escape LIKE's own wildcards, then * -> %, ? -> _
+       AND (cardinality(subjects) = 0 OR EXISTS (SELECT 1 FROM unnest(subjects) g WHERE s LIKE
+            replace(replace(replace(replace(replace(g, '\', '\\'), '%', '\%'), '_', '\_'), '*', '%'), '?', '_')))
+$$;
+
+-- Retention looks dead letters up by subject for every event it considers.
+CREATE INDEX IF NOT EXISTS dead_letters_subject ON dead_letters (subject, event_id) WHERE cleared_at IS NULL;

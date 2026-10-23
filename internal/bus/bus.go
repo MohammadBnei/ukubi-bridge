@@ -180,13 +180,14 @@ type Server struct {
 	clients map[string]Client
 	tokens  Verifier
 
-	mu   sync.Mutex
-	live map[string]*stream // subscription name -> its one active Subscribe
+	mu      sync.Mutex
+	live    map[string]*stream // subscription name -> its one active Subscribe
+	sentGap map[string]int64   // subscription name -> the last gap version a stream sent it
 }
 
 // stream is one Subscribe call. inflight is the event awaiting Ack/Nack, Seq 0 if none.
 type stream struct {
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	inflight event.Event
 	done     chan outcome // buffered 1: written once per claimed delivery
 }
@@ -197,11 +198,18 @@ type outcome struct {
 }
 
 func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
-	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}}
+	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}, sentGap: map[string]int64{}}
 }
 
 // Handler mounts the service on a mux.
 func (s *Server) Handler() (string, http.Handler) { return bridgev1connect.NewBridgeServiceHandler(s) }
+
+// errGapped ends a stream whose subscription a deletion run gapped (events it
+// had not acked are gone); errReplaced one a reconnect on the same name took over.
+var (
+	errGapped   = errors.New("retention deleted events this subscription had not acked: reconnect to get the gap, then resync")
+	errReplaced = errors.New("replaced by a newer stream on this subscription")
+)
 
 // errExpired ends a stream at its token's exp, so the client reconnects with
 // a fresh one (ADR-0066 §1: deactivating an account takes effect within one
@@ -251,19 +259,23 @@ func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.C
 	return ctx, cancel, nil
 }
 
-// ended: the stream stopped because its token expired.
+// ended: why the bridge stopped the stream, as a status the client acts on
+// (nil when the client went away).
 func ended(ctx context.Context) error {
-	if errors.Is(context.Cause(ctx), errExpired) {
+	switch cause := context.Cause(ctx); {
+	case errors.Is(cause, errExpired):
 		return connect.NewError(connect.CodeUnauthenticated, errExpired)
+	case errors.Is(cause, errGapped):
+		return connect.NewError(connect.CodeAborted, cause)
 	}
-	return nil
+	return nil // the client went away, or a newer stream took over (it must not reconnect)
 }
 
 // unavailable is a store error on a bounded stream: Unauthenticated when the
 // token's deadline caused it, so the client refreshes instead of retrying.
 func unavailable(ctx context.Context, err error) error {
-	if e := ended(ctx); e != nil {
-		return e
+	if ctx.Err() != nil {
+		return ended(ctx) // the bridge or the client ended the stream; not an outage
 	}
 	return connect.NewError(connect.CodeUnavailable, err)
 }
@@ -340,21 +352,21 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 	defer cancel()
-	cursor, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+
+	// A deletion run that gaps this subscription between this read and the
+	// registration below would miss this stream: after registering, the gap
+	// version is read again and a change ends the stream, so it reconnects to
+	// the new gap.
+	cursor, gap, readVer, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
 		return unavailable(ctx, err)
 	}
-	// Send headers now: the client's call returns once the subscription is
-	// registered, so a Publish made after it is never missed.
-	if err := out.Send(nil); err != nil {
-		return err
-	}
 
-	ctx, cancel = context.WithCancel(ctx)
-	me := &stream{cancel: cancel, done: make(chan outcome, 1)}
+	ctx, stop := context.WithCancelCause(ctx)
+	me := &stream{cancel: stop, done: make(chan outcome, 1)}
 	s.mu.Lock()
 	if old := s.live[name]; old != nil {
-		old.cancel() // a reconnect replaces a stream that may be half-dead
+		old.cancel(errReplaced) // a reconnect replaces a stream that may be half-dead
 	}
 	s.live[name] = me
 	s.mu.Unlock()
@@ -364,8 +376,28 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 			delete(s.live, name)
 		}
 		s.mu.Unlock()
-		cancel()
+		stop(nil)
 	}()
+	if v, err := s.st.GapVersion(ctx, name); err != nil {
+		return unavailable(ctx, err)
+	} else if v != readVer {
+		return connect.NewError(connect.CodeAborted, errGapped) // gapped in between: reconnect to it
+	}
+
+	// Send headers now: the client's call returns once the subscription is
+	// registered, so a Publish made after it is never missed.
+	if err := out.Send(nil); err != nil {
+		return err
+	}
+	if gap != nil {
+		// Recorded before the send, so a ConfirmGap racing right behind it is accepted.
+		s.mu.Lock()
+		s.sentGap[name] = gap.Version
+		s.mu.Unlock()
+		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To, Version: gap.Version}}); err != nil {
+			return err
+		}
+	}
 
 	for {
 		wake := s.st.Wake()
@@ -415,6 +447,30 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	}
 }
 
+// Drop ends the live streams of subscriptions a deletion run gapped: they
+// reconnect, reload the cursor and get the gap first.
+func (s *Server) Drop(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range names {
+		if st := s.live[n]; st != nil {
+			st.cancel(errGapped)
+		}
+	}
+}
+
+// Prune runs one deletion of what was ingested before cutoff, then ends the
+// streams that lost events, so they reconnect to their gap. A stream that was
+// only moved keeps going: its in-memory cursor is merely behind, Match skips
+// the deleted rows and Ack never moves the stored cursor back.
+func (s *Server) Prune(ctx context.Context, cutoff time.Time) (store.Pruned, error) {
+	p, err := s.st.Prune(ctx, cutoff)
+	if err == nil {
+		s.Drop(p.Gapped)
+	}
+	return p, err
+}
+
 // claim takes the in-flight event off subscription sub's live stream, so
 // exactly one Ack or Nack settles it.
 func (s *Server) claim(sub string, seq int64) (*stream, event.Event, error) {
@@ -444,6 +500,35 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.AckResponse{}), nil
+}
+
+// ConfirmGap clears a gap the subscriber resynced from. Only a version a
+// stream has sent may be confirmed, so a confirmation cannot run ahead of the
+// gap message (it may come after that stream ended: a resync can outlast a
+// token). Confirming twice is fine; an older version is FailedPrecondition (a
+// later run widened it: reconnect for the new one).
+func (s *Server) ConfirmGap(ctx context.Context, req *connect.Request[bridgev1.ConfirmGapRequest]) (*connect.Response[bridgev1.ConfirmGapResponse], error) {
+	sub, v := req.Msg.GetSubscription(), req.Msg.GetVersion()
+	if _, _, err := s.owns(req.Header(), sub); err != nil {
+		return nil, err
+	}
+	if v <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("version must be positive"))
+	}
+	s.mu.Lock()
+	sent := s.sentGap[sub] == v
+	s.mu.Unlock()
+	if !sent {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d was never sent on %q", v, sub))
+	}
+	current, err := s.st.ClearGap(ctx, sub, v)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	if !current {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d of %q is not current: reconnect", v, sub))
+	}
+	return connect.NewResponse(&bridgev1.ConfirmGapResponse{}), nil
 }
 
 // ponytail: only Nacks count as failures. A subscriber that crashes on an
@@ -511,10 +596,32 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 	if err != nil {
 		return unavailable(ctx, err)
 	}
+	through, err := s.st.DeletedThrough(ctx)
+	if err != nil {
+		return unavailable(ctx, err)
+	}
+	if from := max(req.Msg.GetFromSeq(), 1); from <= through {
+		if err := out.Send(&bridgev1.ReplayResponse{Gap: &bridgev1.Gap{FromSeq: from, ToSeq: through}}); err != nil {
+			return err
+		}
+	}
+	// A deletion run can commit mid-replay: each page re-reads the watermark
+	// and announces what it removed ahead of the replay.
+	gapped := through
 	for after := max(req.Msg.GetFromSeq()-1, 0); after < head; {
 		ds, err := s.st.Match(ctx, sub, after, 100)
 		if err != nil {
 			return unavailable(ctx, err)
+		}
+		now, err := s.st.DeletedThrough(ctx)
+		if err != nil {
+			return unavailable(ctx, err)
+		}
+		if now > gapped && now > after {
+			if err := out.Send(&bridgev1.ReplayResponse{Gap: &bridgev1.Gap{FromSeq: max(after+1, gapped+1), ToSeq: now}}); err != nil {
+				return err
+			}
+			gapped = now
 		}
 		if len(ds) == 0 {
 			return nil
