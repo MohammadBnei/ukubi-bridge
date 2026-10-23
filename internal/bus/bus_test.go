@@ -2,8 +2,6 @@ package bus
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -29,7 +27,22 @@ type fixture struct {
 	api bridgev1connect.BridgeServiceClient
 }
 
-func hash(tok string) string { s := sha256.Sum256([]byte(tok)); return hex.EncodeToString(s[:]) }
+// fakeTokens maps a bearer to its subject; every token is valid for exp.
+type fakeTokens map[string]string
+
+func (f fakeTokens) Verify(raw string) (string, time.Time, error) {
+	sub, ok := f[raw]
+	if !ok {
+		return "", time.Time{}, errors.New("unknown token")
+	}
+	if raw == "short-token" {
+		return sub, time.Now().Add(300 * time.Millisecond), nil
+	}
+	return sub, time.Now().Add(time.Hour), nil
+}
+
+// nobody is a valid authentik token for an account the table does not list.
+var tokens = fakeTokens{"core-token": "bridge-core", "app-token": "app", "nobody-token": "nobody", "short-token": "bridge-core"}
 
 // setup runs the API against its own fresh database, so it never races the
 // store package's TRUNCATE when `go test ./...` runs packages in parallel.
@@ -63,15 +76,17 @@ func setup(t *testing.T) fixture {
 	}
 	t.Cleanup(func() { db.Close(ctx) })
 
-	clients, err := ParseClients(fmt.Sprintf(`{
-		"core": {"token_sha256": %q, "kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "subscribe": true, "privileged": true},
-		"app":  {"token_sha256": %q, "kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"], "subscribe": true}
-	}`, hash("core-token"), hash("app-token")))
+	clients, err := ParseClients(`{
+		"bridge-core": {"kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "privileged": true,
+		                "subscribe": [{"types": ["dev."], "subjects": [""]}]},
+		"app":         {"kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"],
+		                "subscribe": [{"types": ["dev.app."], "subjects": ["app/"]}]}
+	}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle(New(st, clients).Handler())
+	mux.Handle(New(st, clients, tokens).Handler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
@@ -101,7 +116,7 @@ func (f fixture) subscribe(t *testing.T, name string, subjects ...string) <-chan
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	stream, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: name, Subjects: subjects}))
+	stream, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: name, Types: []string{"dev."}, Subjects: subjects}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +168,7 @@ func TestPublishDedup(t *testing.T) {
 
 func TestHeadOfLine(t *testing.T) {
 	f := setup(t)
-	ch := f.subscribe(t, "core/hol", "hol/*")
+	ch := f.subscribe(t, "bridge-core/hol", "hol/*")
 	f.publish(t, "core-token", ev("h1", "hol/a"))
 	f.publish(t, "core-token", ev("h2", "hol/b"))
 	f.publish(t, "core-token", ev("h3", "other/c")) // filtered out
@@ -163,11 +178,11 @@ func TestHeadOfLine(t *testing.T) {
 		t.Fatalf("got %s first, want h1", first.Id)
 	}
 	quiet(t, ch) // h2 waits for h1's ack
-	_, err := f.api.Ack(context.Background(), as("core-token", &bridgev1.AckRequest{Subscription: "core/hol", Seq: first.Seq + 1}))
+	_, err := f.api.Ack(context.Background(), as("core-token", &bridgev1.AckRequest{Subscription: "bridge-core/hol", Seq: first.Seq + 1}))
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("ack of an event not in flight: %v, want FailedPrecondition", err)
 	}
-	f.ack(t, "core/hol", first.Seq)
+	f.ack(t, "bridge-core/hol", first.Seq)
 	if second := recv(t, ch); second.Id != "h2" {
 		t.Fatalf("got %s second, want h2", second.Id)
 	}
@@ -184,7 +199,7 @@ func (f fixture) ack(t *testing.T, sub string, seq int64) {
 // events on its subject are parked behind it while other subjects flow.
 func TestNackDeadLetterParksSubject(t *testing.T) {
 	f := setup(t)
-	ch := f.subscribe(t, "core/dlq", "dlq/*")
+	ch := f.subscribe(t, "bridge-core/dlq", "dlq/*")
 	f.publish(t, "core-token", ev("p1", "dlq/poison"))
 	f.publish(t, "core-token", ev("p2", "dlq/poison"))
 	f.publish(t, "core-token", ev("p3", "dlq/fine"))
@@ -194,7 +209,7 @@ func TestNackDeadLetterParksSubject(t *testing.T) {
 		if e.Id != "p1" {
 			t.Fatalf("attempt %d delivered %s, want p1 redelivered", i+1, e.Id)
 		}
-		if _, err := f.api.Nack(context.Background(), as("core-token", &bridgev1.NackRequest{Subscription: "core/dlq", Seq: e.Seq, Reason: "boom"})); err != nil {
+		if _, err := f.api.Nack(context.Background(), as("core-token", &bridgev1.NackRequest{Subscription: "bridge-core/dlq", Seq: e.Seq, Reason: "boom"})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -203,7 +218,7 @@ func TestNackDeadLetterParksSubject(t *testing.T) {
 	}
 	rows, _ := f.db.Query(context.Background(), `
 		SELECT e.ce_id FROM dead_letters d JOIN events e ON e.id = d.event_id
-		WHERE d.subscription = 'core/dlq' ORDER BY d.event_id`)
+		WHERE d.subscription = 'bridge-core/dlq' ORDER BY d.event_id`)
 	got, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		t.Fatal(err)
@@ -216,13 +231,13 @@ func TestNackDeadLetterParksSubject(t *testing.T) {
 // A Nack reason Postgres cannot store must not block dead-lettering.
 func TestNackReasonSanitized(t *testing.T) {
 	f := setup(t)
-	ch := f.subscribe(t, "core/nul", "nul/*")
+	ch := f.subscribe(t, "bridge-core/nul", "nul/*")
 	f.publish(t, "core-token", ev("n1", "nul/a"))
 	f.publish(t, "core-token", ev("n2", "nul/b"))
 
 	for range MaxAttempts {
 		e := recv(t, ch)
-		if _, err := f.api.Nack(context.Background(), as("core-token", &bridgev1.NackRequest{Subscription: "core/nul", Seq: e.Seq, Reason: "bad\x00" + strings.Repeat("é", 1000)})); err != nil {
+		if _, err := f.api.Nack(context.Background(), as("core-token", &bridgev1.NackRequest{Subscription: "bridge-core/nul", Seq: e.Seq, Reason: "bad\x00" + strings.Repeat("é", 1000)})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -230,7 +245,7 @@ func TestNackReasonSanitized(t *testing.T) {
 		t.Fatalf("after dead-lettering n1 got %s, want n2", e.Id)
 	}
 	var reason string
-	if err := f.db.QueryRow(context.Background(), `SELECT reason FROM dead_letters WHERE subscription = 'core/nul'`).Scan(&reason); err != nil {
+	if err := f.db.QueryRow(context.Background(), `SELECT reason FROM dead_letters WHERE subscription = 'bridge-core/nul'`).Scan(&reason); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(reason, "5 attempts: bad") || len(reason) > 1100 || !utf8.ValidString(reason) {
@@ -240,14 +255,14 @@ func TestNackReasonSanitized(t *testing.T) {
 
 func TestReplay(t *testing.T) {
 	f := setup(t)
-	ch := f.subscribe(t, "core/replay", "rep/*")
+	ch := f.subscribe(t, "bridge-core/replay", "rep/*")
 	f.publish(t, "core-token", ev("r1", "rep/a"))
 	f.publish(t, "core-token", ev("r2", "rep/a"))
 	first := recv(t, ch)
-	f.ack(t, "core/replay", first.Seq)
+	f.ack(t, "bridge-core/replay", first.Seq)
 	second := recv(t, ch)
 
-	stream, err := f.api.Replay(context.Background(), as("core-token", &bridgev1.ReplayRequest{Subscription: "core/replay", FromSeq: first.Seq}))
+	stream, err := f.api.Replay(context.Background(), as("core-token", &bridgev1.ReplayRequest{Subscription: "bridge-core/replay", FromSeq: first.Seq}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,11 +285,11 @@ func TestReplay(t *testing.T) {
 	var replayedRows int
 	var cursor int64
 	f.db.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE replayed`).Scan(&replayedRows)
-	f.db.QueryRow(context.Background(), `SELECT last_acked_id FROM subscriptions WHERE name = 'core/replay'`).Scan(&cursor)
+	f.db.QueryRow(context.Background(), `SELECT last_acked_id FROM subscriptions WHERE name = 'bridge-core/replay'`).Scan(&cursor)
 	if replayedRows != 0 || cursor != first.Seq {
 		t.Fatalf("replay mutated state: %d replayed rows, cursor %d (want 0, %d)", replayedRows, cursor, first.Seq)
 	}
-	f.ack(t, "core/replay", second.Seq)
+	f.ack(t, "bridge-core/replay", second.Seq)
 }
 
 func TestAuthz(t *testing.T) {
@@ -327,7 +342,7 @@ func TestAuthz(t *testing.T) {
 			return err
 		}(), connect.CodePermissionDenied},
 		{"another client's subscription", func() error {
-			_, err := f.api.Ack(ctx, as("app-token", &bridgev1.AckRequest{Subscription: "core", Seq: 1}))
+			_, err := f.api.Ack(ctx, as("app-token", &bridgev1.AckRequest{Subscription: "bridge-core", Seq: 1}))
 			return err
 		}(), connect.CodePermissionDenied},
 	}
@@ -358,5 +373,82 @@ func TestPublishInvalid(t *testing.T) {
 	e := &bridgev1.CloudEvent{Id: "i2", Type: "dev.app.x", Subject: "app/x", Data: []byte(`{"a":"\u0000"}`)}
 	if _, err := f.api.Publish(context.Background(), as("app-token", &bridgev1.PublishRequest{Event: e})); err != nil {
 		t.Errorf("\\u0000 in data: %v, want stored", err)
+	}
+}
+
+func TestReadRules(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	sub := func(tok, name string, types, subjects []string) error {
+		stream, err := f.api.Subscribe(ctx, as(tok, &bridgev1.SubscribeRequest{Name: name, Types: types, Subjects: subjects}))
+		if err != nil {
+			return err
+		}
+		defer stream.Close()
+		stream.Receive() // the first read surfaces a refusal sent before any message
+		return stream.Err()
+	}
+	refused := map[string]error{
+		"unlisted account":  sub("nobody-token", "nobody", []string{"dev.app."}, []string{"app/*"}),
+		"no types":          sub("app-token", "app", nil, []string{"app/*"}),
+		"type outside rule": sub("app-token", "app", []string{"dev."}, []string{"app/*"}),
+		"no subjects":       sub("app-token", "app", []string{"dev.app."}, nil),
+		"subject outside":   sub("app-token", "app", []string{"dev.app."}, []string{"github/*"}),
+		"another's name":    sub("app-token", "bridge-core/x", []string{"dev.app."}, []string{"app/*"}),
+	}
+	for name, err := range refused {
+		if c := connect.CodeOf(err); c != connect.CodePermissionDenied && c != connect.CodeUnauthenticated {
+			t.Errorf("%s: %v, want a refusal", name, err)
+		}
+	}
+
+	// Replay re-checks the stored filter: one widened behind the bridge's back is refused.
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		cctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
+		stream, err := f.api.Subscribe(cctx, as("app-token", &bridgev1.SubscribeRequest{Name: "app/r", Types: []string{"dev.app."}, Subjects: []string{"app/*"}}))
+		if err == nil {
+			for stream.Receive() {
+			}
+		}
+	}()
+	<-ch
+	if _, err := f.db.Exec(ctx, `UPDATE subscriptions SET types = '{dev.}', subjects = '{}' WHERE name = 'app/r'`); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := f.api.Replay(ctx, as("app-token", &bridgev1.ReplayRequest{Subscription: "app/r", FromSeq: 1}))
+	if err == nil {
+		for rs.Receive() {
+		}
+		err = rs.Err()
+	}
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("replay of a widened filter: %v, want PermissionDenied", err)
+	}
+}
+
+// A stream ends at its token's exp with Unauthenticated, so the client
+// reconnects with a fresh token instead of reading on a lapsed one.
+func TestStreamEndsAtExpiry(t *testing.T) {
+	f := setup(t)
+	stream, err := f.api.Subscribe(context.Background(), as("short-token", &bridgev1.SubscribeRequest{Name: "bridge-core/exp", Types: []string{"dev."}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for stream.Receive() {
+		}
+		done <- stream.Err()
+	}()
+	select {
+	case err := <-done:
+		if connect.CodeOf(err) != connect.CodeUnauthenticated {
+			t.Fatalf("stream ended with %v, want Unauthenticated", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream outlived its token")
 	}
 }

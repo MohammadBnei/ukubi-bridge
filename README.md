@@ -30,6 +30,11 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 - `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
   `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is
   scoped to the webhook path.
+  - Every call carries an authentik access token (`Authorization: Bearer`):
+    RS256, signed by the pinned certificate, issuer and client id of the
+    `ukubi-bridge-api` provider, more than 15 s left. Its `sub` (the
+    authentik service account) names the client in `BRIDGE_API_CLIENTS`
+    (infra-bootstrap ADR-0066).
   - `Publish` — appends one event, deduplicated on `(source, id)`. The source
     is always `client/<name>`. A client publishes only types under its
     `publish_types` and subjects under its `publish_subjects`, so an app
@@ -41,7 +46,10 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `privileged` client (agent-fleet core) sets actor, trust, owner and hops.
     Nobody sets `replayed`.
   - `Subscribe(name, types, subjects)` — `name` is the client's own name or
-    `<name>/<suffix>`. A new subscription starts at the head of the log.
+    `<name>/<suffix>`. The whole filter must fit one of the client's
+    `subscribe` rules, and `types` cannot be empty. The stream ends
+    `Unauthenticated` at the token's expiry: reconnect with a fresh token
+    (the cursor is kept). A new subscription starts at the head of the log.
     Delivery is head-of-line: the next matching event is sent only once the
     current one is acked. A NOTIFY sent inside each insert wakes the stream;
     it also polls every 30 s. A second `Subscribe` on the same name replaces
@@ -52,7 +60,8 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     events on the subject go straight to `dead_letters` too, so a thread is
     never processed out of order.
   - `Replay(subscription, from_seq)` — streams the subscription's matching
-    events from `from_seq` to the current head with `replayed=true`. No ack,
+    events from `from_seq` to the current head with `replayed=true`, after
+    checking the stored filter still fits the client's rules. No ack,
     no cursor change, nothing written. Subscribers must be idempotent on
     `(source, id)` (or `seq`, which is the same event's log position) — never
     on `id` alone: two clients can both publish id `1`.
@@ -82,7 +91,10 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |
-| `BRIDGE_CLIENTS` | API clients, JSON: `{"core": {"token_sha256": "<hex sha256 of the bearer token>", "kind": "agent", "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": true, "privileged": true}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`); `publish_types` are type prefixes, `publish_subjects` subject prefixes (`""` allows any; an app gets its own, e.g. `["zot/"]`). Missing either: that client publishes nothing. Empty: every call is refused. |
+| `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |
+| `BRIDGE_OIDC_ISSUER`, `BRIDGE_OIDC_CLIENT_ID` | The authentik provider's issuer URL and client id; a token must carry both (`iss`, `aud`, `azp`). |
+| `BRIDGE_OIDC_CERT` | The pinned signing certificate(s), PEM: the only trust anchor. Empty: every API call is refused, the webhooks still work. |
+| `BRIDGE_OIDC_JWKS_URL` | Optional. The provider's JWKS, fetched hourly and compared with the pinned certificate; a mismatch is logged, never trusted. |
 | `BRIDGE_GITHUB_APP_ID` | App id, for the reconcile loop. Unset (or no key): reconcile is off, with a warning. |
 | `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
 | `BRIDGE_RECONCILE_LOOKBACK` | Go duration, default `6h`. Keep event retention longer than this. |

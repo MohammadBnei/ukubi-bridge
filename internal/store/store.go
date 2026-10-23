@@ -152,6 +152,15 @@ func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []st
 	return cursor, err
 }
 
+// Filter returns subscription name's stored filter; found is false when it does not exist.
+func (s *Store) Filter(ctx context.Context, name string) (types, subjects []string, found bool, err error) {
+	err = s.db.QueryRow(ctx, `SELECT types, subjects FROM subscriptions WHERE name = $1`, name).Scan(&types, &subjects)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, false, nil
+	}
+	return types, subjects, err == nil, err
+}
+
 // Delivery is an event as one subscription sees it.
 type Delivery struct {
 	event.Event
