@@ -70,7 +70,7 @@ func TestPrune(t *testing.T) {
 	if err := s.DeadLetter(ctx, "parked", event.Event{Seq: 4, Subject: "a/poison"}, "boom"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Ack(ctx, "ahead", 5, 0); err != nil {
+	if err := s.Ack(ctx, "ahead", 5); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Insert(ctx, evOn("old5", "dev.a.x", "a/poison")); err != nil { // id 6, parked behind old3
@@ -130,33 +130,32 @@ func TestPrune(t *testing.T) {
 		t.Fatalf("deleted_through %d", x)
 	}
 
-	// Subscribe reports the gap; an Ack inside it neither clears it nor moves
-	// the cursor back; an Ack past it clears it.
+	// Subscribe reports the gap; an Ack never moves the cursor back; a stream
+	// that sent a narrower gap cannot clear a widened one; one that sent it can.
 	if _, gap, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil); err != nil || gap == nil || gap.From != 2 || gap.To != 6 {
 		t.Fatalf("subscribe gap %+v %v", gap, err)
 	}
-	if err := s.Ack(ctx, "lagging", 3, 6); err != nil {
+	if err := s.Ack(ctx, "lagging", 2); err != nil {
 		t.Fatal(err)
 	}
-	if c, from, _ := cursorGap(t, s, "lagging"); c != 3 || from == nil {
-		t.Fatalf("ack inside the gap: cursor %d gap %v", c, from)
+	if c, _, _ := cursorGap(t, s, "lagging"); c != 3 {
+		t.Fatalf("an Ack moved the cursor back to %d", c)
 	}
-	// An Ack past the gap from a stream that never sent it leaves it in place.
-	if err := s.Ack(ctx, "lagging", 7, 0); err != nil {
+	if err := s.ClearGap(ctx, "lagging", 5); err != nil {
 		t.Fatal(err)
 	}
 	if _, from, _ := cursorGap(t, s, "lagging"); from == nil {
-		t.Fatal("a gap was cleared by a stream that never sent it")
+		t.Fatal("a narrower sent gap cleared a wider one")
 	}
-	if err := s.Ack(ctx, "lagging", 7, 6); err != nil {
+	if err := s.ClearGap(ctx, "lagging", 6); err != nil {
 		t.Fatal(err)
 	}
-	if c, from, _ := cursorGap(t, s, "lagging"); c != 7 || from != nil {
-		t.Fatalf("ack past the gap: cursor %d gap %v", c, from)
+	if _, from, _ := cursorGap(t, s, "lagging"); from != nil {
+		t.Fatal("the delivered gap was not cleared")
 	}
 
 	// Once the operator clears the dead letters, the kept events go on the
-	// next run, and ahead, which never received old5, gets a gap for it.
+	// next run, and the subscriptions that never received them get a gap.
 	if _, err := s.db.Exec(ctx, `UPDATE dead_letters SET cleared_at = now() WHERE subscription = 'parked'`); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +163,9 @@ func TestPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p3.Deleted != 2 || fmt.Sprint(p3.Gapped) != "[ahead]" {
+	// lagging (cursor 3) never received old3 or old5 either: both gapped.
+	slices.Sort(p3.Gapped)
+	if p3.Deleted != 2 || fmt.Sprint(p3.Gapped) != "[ahead lagging]" {
 		t.Fatalf("after clearing: %+v", p3)
 	}
 	if c, from, to := cursorGap(t, s, "ahead"); c != 6 || from == nil || *from != 6 || *to != 6 {

@@ -188,7 +188,7 @@ func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every t
 		// Whatever the run did: a failing run must not silence this alert.
 		stale, err := st.StaleDeadLetters(ctx, 72*time.Hour)
 		if err != nil {
-			slog.Error("retention failed", "err", err)
+			slog.Error("dead letter check failed", "err", err)
 		}
 		for _, d := range stale {
 			slog.Warn("dead letter uncleared", "subscription", d.Subscription, "subject", d.Subject, "count", d.Count, "since", d.Since)

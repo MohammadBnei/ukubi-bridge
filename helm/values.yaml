@@ -94,11 +94,11 @@ logAlerts:
       threshold: 0
       for: 5m
       severity: warning
-    # Two failed runs (or dead-letter checks) in 3 h: retention is stuck and
-    # the log grows; the dead-letter rule above may also have gone quiet.
+    # Two failures in 3 h (one line per failed run or dead-letter check):
+    # retention is stuck and the log grows, or the rule above may be blind.
     - uid: retention-failing
       title: Bridge retention failing
-      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |= "retention failed" [3h]))'
+      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |~ "retention failed|dead letter check failed" [3h]))'
       threshold: 1
       for: 5m
       severity: warning

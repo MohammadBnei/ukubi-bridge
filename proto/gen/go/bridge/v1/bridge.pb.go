@@ -337,9 +337,9 @@ type SubscribeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Unset on the message that carries a gap.
 	Event *CloudEvent `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
-	// Sent once, first, when retention deleted matching events this
-	// subscription never acked: resync from your own source of truth. It
-	// stays until an Ack past to_seq. Never Ack a gap message.
+	// Sent first when retention deleted matching events this subscription
+	// never acked: resync from your own source of truth. Sent again on every
+	// reconnect until a stream that sent it stayed up 30 s. Never Ack it.
 	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

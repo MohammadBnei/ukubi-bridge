@@ -72,9 +72,9 @@ message SubscribeRequest {
 message SubscribeResponse {
   // Unset on the message that carries a gap.
   CloudEvent event = 1;
-  // Sent once, first, when retention deleted matching events this
-  // subscription never acked: resync from your own source of truth. It
-  // stays until an Ack past to_seq. Never Ack a gap message.
+  // Sent first when retention deleted matching events this subscription
+  // never acked: resync from your own source of truth. Sent again on every
+  // reconnect until a stream that sent it stayed up 30 s. Never Ack it.
   Gap gap = 2;
 }
 

@@ -87,8 +87,10 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
   (widened by later runs, never replaced). Its next `Subscribe` sends one
   message carrying `gap {from_seq, to_seq}` before any event: resync from your
   own source of truth, and never Ack it. Its live stream ends `Aborted`, so it
-  reconnects to that gap. The gap stays until an Ack past `to_seq` on a stream
-  that sent it; an Ack never moves a cursor back.
+  reconnects to that gap. The gap is sent again on every reconnect until a
+  stream that sent it has stayed up 30 s; an Ack never moves a cursor back. A
+  stream replaced by a newer `Subscribe` on the same name ends cleanly: do not
+  reconnect on that.
 - A dead letter is never recorded for an event already deleted.
 - Each subject left parked for 3 days is logged once per run (`dead letter
   uncleared`), and a failed run logs `retention failed`: the chart's Loki rules
@@ -109,17 +111,25 @@ and the per-thread agent-wake cap bounds loops.
 
 ### Unparking a subject
 
-Nothing exposes this yet. Fix the subscriber, replay the parked events (below), then:
+Nothing exposes this yet. Retention keeps parked events only while their dead
+letters are uncleared, and new events on the subject keep parking until it is
+unparked, so work in rounds. Fix the subscriber, then:
 
-```sql
-UPDATE dead_letters SET cleared_at = now()
-WHERE subscription = 'core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;
-```
+1. Note the subject's uncleared dead letters:
+   `SELECT min(event_id), max(event_id) FROM dead_letters WHERE subscription = 'bridge-core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;`
+2. `Replay` from that `min`, and let the subscriber handle the events up to
+   that `max` (idempotent on `(source, id)`).
+3. Clear only what was replayed:
 
-The dead-lettered events stay behind the cursor. Retention keeps them only
-while their dead letter is uncleared, so **Replay first, then clear**: `Replay`
-from the first one's `event_id`, let the subscriber handle them, then run the
-`UPDATE` above. Once cleared, the next run deletes them.
+   ```sql
+   UPDATE dead_letters SET cleared_at = now()
+   WHERE subscription = 'bridge-core' AND subject = 'github/MohammadBnei/editable-blog/pr/42'
+     AND cleared_at IS NULL AND event_id <= <max from step 1>;
+   ```
+4. Repeat from 1 until step 1 finds nothing: events that parked during the
+   round are still uncleared, so they are neither lost nor deleted.
+
+Once cleared, the next retention run deletes those events if they are old.
 
 ## Configuration
 

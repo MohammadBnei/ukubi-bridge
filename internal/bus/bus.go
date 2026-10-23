@@ -180,15 +180,15 @@ type Server struct {
 	clients map[string]Client
 	tokens  Verifier
 
-	mu   sync.Mutex
-	live map[string]*stream // subscription name -> its one active Subscribe
+	mu    sync.Mutex
+	live  map[string]*stream // subscription name -> its one active Subscribe
+	drops map[string]uint64  // subscription name -> deletion runs that gapped it
 }
 
 // stream is one Subscribe call. inflight is the event awaiting Ack/Nack, Seq 0 if none.
 type stream struct {
 	cancel   context.CancelCauseFunc
 	inflight event.Event
-	sentGap  int64        // the to_seq of the gap this stream sent, 0 if none
 	done     chan outcome // buffered 1: written once per claimed delivery
 }
 
@@ -198,18 +198,21 @@ type outcome struct {
 }
 
 func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
-	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}}
+	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}, drops: map[string]uint64{}}
 }
 
 // Handler mounts the service on a mux.
 func (s *Server) Handler() (string, http.Handler) { return bridgev1connect.NewBridgeServiceHandler(s) }
 
-// errMoved ends a stream whose cursor a deletion run moved; errReplaced one a
-// reconnect on the same name took over.
+// errGapped ends a stream whose subscription a deletion run gapped (events it
+// had not acked are gone); errReplaced one a reconnect on the same name took over.
 var (
-	errMoved    = errors.New("retention moved the cursor: reconnect")
+	errGapped   = errors.New("retention deleted events this subscription had not acked: reconnect to get the gap, then resync")
 	errReplaced = errors.New("replaced by a newer stream on this subscription")
 )
+
+// GapHold: a gap clears once the stream that sent it has stayed up this long.
+var GapHold = 30 * time.Second
 
 // errExpired ends a stream at its token's exp, so the client reconnects with
 // a fresh one (ADR-0066 §1: deactivating an account takes effect within one
@@ -265,7 +268,7 @@ func ended(ctx context.Context) error {
 	switch cause := context.Cause(ctx); {
 	case errors.Is(cause, errExpired):
 		return connect.NewError(connect.CodeUnauthenticated, errExpired)
-	case errors.Is(cause, errMoved):
+	case errors.Is(cause, errGapped):
 		return connect.NewError(connect.CodeAborted, cause)
 	}
 	return nil // the client went away, or a newer stream took over (it must not reconnect)
@@ -274,8 +277,8 @@ func ended(ctx context.Context) error {
 // unavailable is a store error on a bounded stream: Unauthenticated when the
 // token's deadline caused it, so the client refreshes instead of retrying.
 func unavailable(ctx context.Context, err error) error {
-	if e := ended(ctx); e != nil {
-		return e
+	if ctx.Err() != nil {
+		return ended(ctx) // the bridge or the client ended the stream; not an outage
 	}
 	return connect.NewError(connect.CodeUnavailable, err)
 }
@@ -353,12 +356,25 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	}
 	defer cancel()
 
-	// Registered before the cursor is read: a deletion run that commits from
-	// here on finds this stream and ends it, so it never runs on a cursor and
-	// gap read before that run.
+	// A deletion run that gaps this subscription between reading the cursor
+	// and registering below bumps drops[name]: then this stream would start
+	// on a cursor and gap read before that run, so it ends instead.
+	s.mu.Lock()
+	gen := s.drops[name]
+	s.mu.Unlock()
+	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+	if err != nil {
+		return unavailable(ctx, err)
+	}
+
 	ctx, stop := context.WithCancelCause(ctx)
 	me := &stream{cancel: stop, done: make(chan outcome, 1)}
 	s.mu.Lock()
+	if s.drops[name] != gen {
+		s.mu.Unlock()
+		stop(nil)
+		return connect.NewError(connect.CodeAborted, errGapped)
+	}
 	if old := s.live[name]; old != nil {
 		old.cancel(errReplaced) // a reconnect replaces a stream that may be half-dead
 	}
@@ -373,10 +389,6 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		stop(nil)
 	}()
 
-	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
-	if err != nil {
-		return unavailable(ctx, err)
-	}
 	// Send headers now: the client's call returns once the subscription is
 	// registered, so a Publish made after it is never missed.
 	if err := out.Send(nil); err != nil {
@@ -386,9 +398,17 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To}}); err != nil {
 			return err
 		}
-		s.mu.Lock()
-		me.sentGap = gap.To // only an Ack on this stream, past this, clears it
-		s.mu.Unlock()
+		// It is the stream's first message: a stream still up GapHold later
+		// has delivered it. Until then a reconnect sends it again.
+		go func(to int64) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(GapHold):
+				cctx, done := context.WithTimeout(context.Background(), 5*time.Second)
+				defer done()
+				_ = s.st.ClearGap(cctx, name, to) // failing leaves it to be resent: harmless
+			}
+		}(gap.To)
 	}
 
 	for {
@@ -445,8 +465,9 @@ func (s *Server) Drop(names []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range names {
+		s.drops[n]++
 		if st := s.live[n]; st != nil {
-			st.cancel(errMoved)
+			st.cancel(errGapped)
 		}
 	}
 }
@@ -486,10 +507,7 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	sentGap := st.sentGap
-	s.mu.Unlock()
-	if err := s.st.Ack(ctx, sub, seq, sentGap); err != nil {
+	if err := s.st.Ack(ctx, sub, seq); err != nil {
 		st.done <- outcome{} // redeliver; subscribers are idempotent on (source, id)
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}

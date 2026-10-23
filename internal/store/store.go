@@ -208,16 +208,18 @@ func (s *Store) Head(ctx context.Context) (int64, error) {
 
 // Ack moves the cursor to seq (never back: a deletion run may have moved it
 // past) and resets the retry count.
-//
-// sentGap is the to_seq of the gap the acking stream sent (0: none). The gap
-// clears only when that stream sent all of it and seq is past it, so a gap
-// recorded or widened after the stream started is never cleared unseen.
-func (s *Store) Ack(ctx context.Context, name string, seq, sentGap int64) error {
+func (s *Store) Ack(ctx context.Context, name string, seq int64) error {
 	_, err := s.db.Exec(ctx, `
-		UPDATE subscriptions SET last_acked_id = GREATEST(last_acked_id, $2), attempts = 0, last_seen = now(),
-			gap_from = CASE WHEN $3 > 0 AND gap_to <= $3 AND $2 > gap_to THEN NULL ELSE gap_from END,
-			gap_to   = CASE WHEN $3 > 0 AND gap_to <= $3 AND $2 > gap_to THEN NULL ELSE gap_to END
-		WHERE name = $1`, name, seq, sentGap)
+		UPDATE subscriptions SET last_acked_id = GREATEST(last_acked_id, $2), attempts = 0, last_seen = now()
+		WHERE name = $1`, name, seq)
+	return err
+}
+
+// ClearGap clears subscription name's gap once a stream delivered it, unless
+// a later run widened it past what that stream sent (to).
+func (s *Store) ClearGap(ctx context.Context, name string, to int64) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE subscriptions SET gap_from = NULL, gap_to = NULL WHERE name = $1 AND gap_to <= $2`, name, to)
 	return err
 }
 

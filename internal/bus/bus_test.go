@@ -93,7 +93,7 @@ func setup(t *testing.T) fixture {
 	t.Cleanup(srv.Close)
 
 	// PollEvery an hour: deliveries in these tests must come from the NOTIFY nudge.
-	MaxAttempts, RetryBase, PollEvery, MinStreamLife = 5, time.Millisecond, time.Hour, 100*time.Millisecond
+	MaxAttempts, RetryBase, PollEvery, MinStreamLife, GapHold = 5, time.Millisecond, time.Hour, 100*time.Millisecond, 200*time.Millisecond
 	return fixture{db: db, api: bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL), srv: bus}
 }
 
@@ -455,8 +455,9 @@ func TestStreamEndsAtExpiry(t *testing.T) {
 	}
 }
 
-// Retention seen from a subscriber: a moved stream ends Aborted, the next
-// Subscribe sends the gap first, and Replay from below the watermark too.
+// Retention seen from a subscriber: a gapped stream ends Aborted, the next
+// Subscribe sends the gap first (until a stream held it GapHold), and Replay
+// from below the watermark too.
 func TestRetentionGap(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
@@ -502,6 +503,12 @@ func TestRetentionGap(t *testing.T) {
 	if g := again.Msg().Gap; g == nil || g.FromSeq != first.Seq || g.ToSeq != p.Through || again.Msg().Event != nil {
 		t.Fatalf("first message %+v, want the gap %d..%d", again.Msg(), first.Seq, p.Through)
 	}
+	time.Sleep(3 * GapHold)
+	var gapTo *int64
+	f.db.QueryRow(ctx, `SELECT gap_to FROM subscriptions WHERE name = 'bridge-core/ret'`).Scan(&gapTo)
+	if gapTo != nil {
+		t.Fatal("a gap delivered on a stream that held was not cleared")
+	}
 
 	rs, err := f.api.Replay(ctx, as("core-token", &bridgev1.ReplayRequest{Subscription: "bridge-core/ret", FromSeq: 1}))
 	if err != nil {
@@ -512,5 +519,49 @@ func TestRetentionGap(t *testing.T) {
 	}
 	for rs.Receive() {
 		t.Fatalf("replay sent a deleted event %+v", rs.Msg())
+	}
+}
+
+// A stream retention only moved (it lost nothing) keeps running; a stream
+// replaced by a reconnect on its name ends cleanly, so its client does not
+// come back and flap with the new one.
+func TestMovedAndReplacedStreams(t *testing.T) {
+	f := setup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // runs before setup's server Close, which waits for open streams
+	open := func(name string) chan error {
+		stream, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: name, Types: []string{"dev.q."}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			for stream.Receive() {
+			}
+			done <- stream.Err()
+		}()
+		return done
+	}
+	quietDone := open("bridge-core/quiet")
+	f.publish(t, "core-token", ev("m1", "app/x")) // dev.app.test: the quiet subscription does not match it
+	f.db.Exec(ctx, `UPDATE events SET ingested_at = now() - interval '40 days'`)
+	p, err := f.srv.Prune(ctx, time.Now().Add(-30*24*time.Hour))
+	if err != nil || len(p.Moved) != 1 || len(p.Gapped) != 0 {
+		t.Fatalf("prune %+v %v", p, err)
+	}
+	select {
+	case err := <-quietDone:
+		t.Fatalf("a moved-only stream ended: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	open("bridge-core/quiet") // replaces it
+	select {
+	case err := <-quietDone:
+		if err != nil {
+			t.Fatalf("replaced stream ended with %v, want a clean end", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replaced stream kept running")
 	}
 }
