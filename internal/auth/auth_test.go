@@ -89,7 +89,7 @@ func TestVerify(t *testing.T) {
 		"no azp":       sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.AZP = "" })),
 		"no exp":       sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.Expiry = nil })),
 		"expired":      sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.Expiry = jwt.NewNumericDate(now.Add(-time.Second)) })),
-		"under 15 s":   sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.Expiry = jwt.NewNumericDate(now.Add(10 * time.Second)) })),
+		"exp now":      sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.Expiry = jwt.NewNumericDate(now) })),
 		"nbf ahead":    sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.NotBefore = jwt.NewNumericDate(now.Add(2 * time.Minute)) })),
 		"iat ahead":    sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.IssuedAt = jwt.NewNumericDate(now.Add(2 * time.Minute)) })),
 		"no sub":       sign(t, jose.RS256, k, mod(func(c *tokenClaims) { c.Subject = "" })),
@@ -116,8 +116,11 @@ func unsigned(t *testing.T, c tokenClaims) string {
 
 func TestNoCertRefusesAll(t *testing.T) {
 	v, err := New("", "", "")
-	if err != nil {
+	if err != nil || v.Pinned() {
 		t.Fatal(err)
+	}
+	if _, err := New(iss, aud, `-----BEGIN CERTIFICATE-----\nMIIB...`); err == nil {
+		t.Fatal("a set certificate with no PEM block was accepted as none")
 	}
 	k := key(t)
 	if _, _, err := v.Verify(sign(t, jose.RS256, k, good(time.Now()))); err != ErrNoKey {

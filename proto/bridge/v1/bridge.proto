@@ -36,7 +36,7 @@ message CloudEvent {
 // BridgeService is the bus API. Callers authenticate with an authentik access
 // token for the ukubi-bridge-api provider; its subject names their entry in
 // BRIDGE_API_CLIENTS (infra-bootstrap ADR-0066). A stream ends Unauthenticated
-// when its token expires: reconnect with a fresh one.
+// 15 s before its token expires: reconnect with a fresh one.
 service BridgeService {
   rpc Publish(PublishRequest) returns (PublishResponse);
   // Subscribe streams matching events after the subscription's cursor, one at

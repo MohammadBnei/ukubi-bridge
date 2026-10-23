@@ -45,7 +45,7 @@ func main() {
 		slog.Error("oidc", "err", err)
 		os.Exit(1)
 	}
-	if _, _, err := tokens.Verify(""); errors.Is(err, auth.ErrNoKey) {
+	if !tokens.Pinned() {
 		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
 	}
 	st, err := store.Open(ctx, os.Getenv("BRIDGE_DATABASE_URL"))

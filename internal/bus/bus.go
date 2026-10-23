@@ -67,6 +67,9 @@ func ParseClients(js string) (map[string]Client, error) {
 	if err := dec.Decode(&clients); err != nil {
 		return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %w", err)
 	}
+	if dec.More() {
+		return nil, errors.New("BRIDGE_API_CLIENTS: data after the client table")
+	}
 	for name, c := range clients {
 		if name == "" || strings.Contains(name, "/") {
 			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: bad client name %q", name)
@@ -83,11 +86,17 @@ func ParseClients(js string) (map[string]Client, error) {
 		if err := typePrefixes(c.PublishTypes); err != nil {
 			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_types: %w", name, err)
 		}
+		if err := subjectPrefixes(c.PublishSubjects); err != nil {
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_subjects: %w", name, err)
+		}
 		for i, r := range c.Subscribe {
 			if len(r.Types) == 0 || len(r.Subjects) == 0 {
 				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d needs types and subjects", name, i)
 			}
 			if err := typePrefixes(r.Types); err != nil {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d: %w", name, i, err)
+			}
+			if err := subjectPrefixes(r.Subjects); err != nil {
 				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d: %w", name, i, err)
 			}
 		}
@@ -103,6 +112,17 @@ func typePrefixes(ps []string) error {
 	for _, p := range ps {
 		if !strings.HasSuffix(p, ".") {
 			return fmt.Errorf("type prefix %q must end with a dot", p)
+		}
+	}
+	return nil
+}
+
+// subjectPrefixes: "" (any subject) or ending with a slash, for the same
+// reason (fleet/client/game/ is not fleet/client/gameother/).
+func subjectPrefixes(ps []string) error {
+	for _, p := range ps {
+		if p != "" && !strings.HasSuffix(p, "/") {
+			return fmt.Errorf("subject prefix %q must end with a slash", p)
 		}
 	}
 	return nil
@@ -215,16 +235,36 @@ func (s *Server) owns(h http.Header, sub string) (Client, time.Time, error) {
 	return c, exp, nil
 }
 
-// untilExpiry bounds a stream by its token; ended reports whether that is why it stopped.
-func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.CancelFunc) {
-	return context.WithDeadlineCause(ctx, exp, errExpired)
+// StreamMargin: a stream ends this long before its token's exp, so the Ack
+// for its last delivery still carries a valid token; a token with less left
+// cannot open one (it would end at once and the client would loop).
+var StreamMargin = 15 * time.Second
+
+// untilExpiry bounds a stream by its token.
+func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.CancelFunc, error) {
+	end := exp.Add(-StreamMargin)
+	if !end.After(time.Now()) {
+		return nil, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("token too close to expiry to open a stream"))
+	}
+	ctx, cancel := context.WithDeadlineCause(ctx, end, errExpired)
+	return ctx, cancel, nil
 }
 
+// ended: the stream stopped because its token expired.
 func ended(ctx context.Context) error {
 	if errors.Is(context.Cause(ctx), errExpired) {
 		return connect.NewError(connect.CodeUnauthenticated, errExpired)
 	}
 	return nil
+}
+
+// unavailable is a store error on a bounded stream: Unauthenticated when the
+// token's deadline caused it, so the client refreshes instead of retrying.
+func unavailable(ctx context.Context, err error) error {
+	if e := ended(ctx); e != nil {
+		return e
+	}
+	return connect.NewError(connect.CodeUnavailable, err)
 }
 
 func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
@@ -294,9 +334,14 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	if !c.mayRead(req.Msg.GetTypes(), req.Msg.GetSubjects()) {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not read that filter", c.Name))
 	}
+	ctx, cancel, err := untilExpiry(ctx, exp)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	cursor, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, err)
+		return unavailable(ctx, err)
 	}
 	// Send headers now: the client's call returns once the subscription is
 	// registered, so a Publish made after it is never missed.
@@ -304,7 +349,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 
-	ctx, cancel := untilExpiry(ctx, exp)
+	ctx, cancel = context.WithCancel(ctx)
 	me := &stream{cancel: cancel, done: make(chan outcome, 1)}
 	s.mu.Lock()
 	if old := s.live[name]; old != nil {
@@ -328,7 +373,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 			return ended(ctx)
 		}
 		if err != nil {
-			return connect.NewError(connect.CodeUnavailable, err)
+			return unavailable(ctx, err)
 		}
 		if len(ds) == 0 {
 			select {
@@ -342,7 +387,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		d := ds[0]
 		if d.Parked {
 			if err := s.st.DeadLetter(ctx, name, d.Event, "subject parked"); err != nil {
-				return connect.NewError(connect.CodeUnavailable, err)
+				return unavailable(ctx, err)
 			}
 			cursor = d.Seq
 			continue
@@ -456,19 +501,19 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 	if !c.mayRead(types, subjects) {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may no longer read %q's filter", c.Name, sub))
 	}
-	ctx, cancel := untilExpiry(ctx, exp)
+	ctx, cancel, err := untilExpiry(ctx, exp)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	head, err := s.st.Head(ctx)
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, err)
+		return unavailable(ctx, err)
 	}
 	for after := max(req.Msg.GetFromSeq()-1, 0); after < head; {
 		ds, err := s.st.Match(ctx, sub, after, 100)
 		if err != nil {
-			if e := ended(ctx); e != nil {
-				return e
-			}
-			return connect.NewError(connect.CodeUnavailable, err)
+			return unavailable(ctx, err)
 		}
 		if len(ds) == 0 {
 			return nil

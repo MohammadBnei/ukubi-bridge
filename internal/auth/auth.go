@@ -21,12 +21,8 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// MinLife is the least time a token may have left. A token about to expire
-// would open a stream that ends at once, and the client would loop on it.
-const MinLife = 15 * time.Second
-
-// skew is the leeway for nbf and iat only. exp gets none: a stream ends at
-// exp, so a token accepted past it would end its stream before it began.
+// skew is the leeway for nbf and iat only. exp gets none: a stream is bounded
+// by exp, so a token accepted past it would end its stream before it began.
 const skew = time.Minute
 
 // ErrNoKey: no certificate is pinned yet, so every token is refused.
@@ -64,11 +60,17 @@ func New(issuer, clientID, certPEM string) (*Verifier, error) {
 		}
 		v.keys = append(v.keys, k)
 	}
+	if len(v.keys) == 0 && certPEM != "" {
+		return nil, errors.New("BRIDGE_OIDC_CERT is set but holds no PEM certificate")
+	}
 	if len(v.keys) > 0 && (issuer == "" || clientID == "") {
 		return nil, errors.New("BRIDGE_OIDC_ISSUER and BRIDGE_OIDC_CLIENT_ID are required with a certificate")
 	}
 	return v, nil
 }
+
+// Pinned reports whether a certificate is pinned; without one every token is refused.
+func (v *Verifier) Pinned() bool { return len(v.keys) > 0 }
 
 type claims struct {
 	jwt.Claims
@@ -87,9 +89,13 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 	var c claims
 	verified := false
 	for _, k := range v.keys {
-		if tok.Claims(k, &c) == nil {
+		err := tok.Claims(k, &c)
+		if err == nil {
 			verified = true
 			break
+		}
+		if !errors.Is(err, jose.ErrCryptoFailure) {
+			return "", time.Time{}, fmt.Errorf("token claims: %w", err) // signed, but unreadable
 		}
 	}
 	if !verified {
@@ -103,8 +109,8 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 		return "", time.Time{}, errors.New("token: not issued to this bridge")
 	case c.Expiry == nil:
 		return "", time.Time{}, errors.New("token: no exp")
-	case c.Expiry.Time().Before(now.Add(MinLife)):
-		return "", time.Time{}, errors.New("token: expired or about to")
+	case !c.Expiry.Time().After(now):
+		return "", time.Time{}, errors.New("token: expired")
 	case c.NotBefore != nil && c.NotBefore.Time().After(now.Add(skew)):
 		return "", time.Time{}, errors.New("token: not valid yet")
 	case c.IssuedAt != nil && c.IssuedAt.Time().After(now.Add(skew)):
@@ -119,6 +125,9 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 // keys is pinned, which is what a certificate rotation looks like. It never
 // changes what Verify trusts.
 func (v *Verifier) Watch(ctx context.Context, url string, client *http.Client, every time.Duration) {
+	if !v.Pinned() {
+		return // nothing to compare yet
+	}
 	for {
 		if err := v.compare(ctx, url, client); err != nil {
 			slog.Warn("oidc: jwks check", "url", url, "err", err)

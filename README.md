@@ -32,7 +32,7 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   scoped to the webhook path.
   - Every call carries an authentik access token (`Authorization: Bearer`):
     RS256, signed by the pinned certificate, issuer and client id of the
-    `ukubi-bridge-api` provider, more than 15 s left. Its `sub` (the
+    `ukubi-bridge-api` provider, not expired. Its `sub` (the
     authentik service account) names the client in `BRIDGE_API_CLIENTS`
     (infra-bootstrap ADR-0066).
   - `Publish` — appends one event, deduplicated on `(source, id)`. The source
@@ -48,8 +48,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   - `Subscribe(name, types, subjects)` — `name` is the client's own name or
     `<name>/<suffix>`. The whole filter must fit one of the client's
     `subscribe` rules, and `types` cannot be empty. The stream ends
-    `Unauthenticated` at the token's expiry: reconnect with a fresh token
-    (the cursor is kept). A new subscription starts at the head of the log.
+    `Unauthenticated` 15 s before the token's expiry, so the Ack of its last
+    delivery still has a valid token: reconnect with a fresh one (the cursor
+    is kept). A token with less than 15 s left cannot open a stream. A new subscription starts at the head of the log.
     Delivery is head-of-line: the next matching event is sent only once the
     current one is acked. A NOTIFY sent inside each insert wakes the stream;
     it also polls every 30 s. A second `Subscribe` on the same name replaces
@@ -61,7 +62,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     never processed out of order.
   - `Replay(subscription, from_seq)` — streams the subscription's matching
     events from `from_seq` to the current head with `replayed=true`, after
-    checking the stored filter still fits the client's rules. No ack,
+    checking the stored filter still fits the client's rules (`NotFound` for a
+    subscription never created by `Subscribe`). Bounded by the token like
+    `Subscribe`. No ack,
     no cursor change, nothing written. Subscribers must be idempotent on
     `(source, id)` (or `seq`, which is the same event's log position) — never
     on `id` alone: two clients can both publish id `1`.

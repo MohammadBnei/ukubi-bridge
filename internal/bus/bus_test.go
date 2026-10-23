@@ -36,7 +36,7 @@ func (f fakeTokens) Verify(raw string) (string, time.Time, error) {
 		return "", time.Time{}, errors.New("unknown token")
 	}
 	if raw == "short-token" {
-		return sub, time.Now().Add(300 * time.Millisecond), nil
+		return sub, time.Now().Add(StreamMargin + 300*time.Millisecond), nil
 	}
 	return sub, time.Now().Add(time.Hour), nil
 }

@@ -53,14 +53,17 @@ func TestParseClients(t *testing.T) {
 		t.Fatalf("parsed %+v", c)
 	}
 	bad := map[string]string{
-		"privileged app":          `{"bridge-game": {"privileged": true}}`,
-		"slash in name":           `{"a/b": {}}`,
-		"type prefix without dot": `{"bridge-game": {"publish_types": ["dev.bnei.game"]}}`,
-		"rule without subjects":   `{"bridge-game": {"subscribe": [{"types": ["dev.bnei.game."]}]}}`,
-		"rule without types":      `{"bridge-game": {"subscribe": [{"subjects": [""]}]}}`,
-		"rule type without dot":   `{"bridge-game": {"subscribe": [{"types": ["dev"], "subjects": [""]}]}}`,
-		"unknown kind":            `{"bridge-game": {"kind": "root"}}`,
-		"old bearer field":        `{"bridge-game": {"token_sha256": "00"}}`,
+		"privileged app":           `{"bridge-game": {"privileged": true}}`,
+		"slash in name":            `{"a/b": {}}`,
+		"type prefix without dot":  `{"bridge-game": {"publish_types": ["dev.bnei.game"]}}`,
+		"rule without subjects":    `{"bridge-game": {"subscribe": [{"types": ["dev.bnei.game."]}]}}`,
+		"rule without types":       `{"bridge-game": {"subscribe": [{"subjects": [""]}]}}`,
+		"rule type without dot":    `{"bridge-game": {"subscribe": [{"types": ["dev"], "subjects": [""]}]}}`,
+		"unknown kind":             `{"bridge-game": {"kind": "root"}}`,
+		"old bearer field":         `{"bridge-game": {"token_sha256": "00"}}`,
+		"subject without slash":    `{"bridge-game": {"subscribe": [{"types": ["dev.bnei.game."], "subjects": ["fleet/client/game"]}]}}`,
+		"publish subject no slash": `{"bridge-game": {"publish_subjects": ["game"]}}`,
+		"trailing data":            `{"bridge-game": {}} {"bridge-push": {}}`,
 	}
 	for name, js := range bad {
 		if _, err := ParseClients(js); err == nil {
