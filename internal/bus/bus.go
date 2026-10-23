@@ -4,12 +4,10 @@ package bus
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"slices"
@@ -33,56 +31,154 @@ var (
 	PollEvery   = 30 * time.Second // fallback when a NOTIFY is missed
 )
 
-// Client is one BRIDGE_CLIENTS entry.
-// ponytail: static clients from env; ADR-0060 §8's TokenReview + namespace
-// allowlist replaces this when apps subscribe.
+// Client is one BRIDGE_API_CLIENTS entry, keyed by its authentik username
+// (infra-bootstrap ADR-0066 §1). It holds permissions only, no secret.
 type Client struct {
 	Name         string   `json:"-"`
-	TokenSHA256  string   `json:"token_sha256"`  // hex sha256 of the bearer token
 	Kind         string   `json:"kind"`          // actor stamped on its events; default machine
 	PublishTypes []string `json:"publish_types"` // type prefixes it may publish
 	// Subject prefixes it may publish on; "" allows any. Keeps an app off
 	// threads it does not own, e.g. github/... PRs (parking is per subject).
 	PublishSubjects []string `json:"publish_subjects"`
-	Subscribe       bool     `json:"subscribe"`
-	Privileged      bool     `json:"privileged"` // may set actor, trusted, hops, causation_id (agent-fleet core only)
+	// What it may read: one subscription's whole filter must fit one rule
+	// (ADR-0066 §2). privileged never widens it.
+	Subscribe  []Rule `json:"subscribe"`
+	Privileged bool   `json:"privileged"` // may set actor, trusted, hops, causation_id
 }
 
-// ParseClients reads BRIDGE_CLIENTS: {"name": {token_sha256, kind, publish_types, publish_subjects, subscribe, privileged}}.
+// Rule pairs type prefixes with subject prefixes; subject "" allows any.
+type Rule struct {
+	Types    []string `json:"types"`
+	Subjects []string `json:"subjects"`
+}
+
+// PrivilegedClient is the only client that may be privileged: agent-fleet core.
+const PrivilegedClient = "bridge-core"
+
+// ParseClients reads BRIDGE_API_CLIENTS: {"<username>": {kind, publish_types, publish_subjects, subscribe, privileged}}.
 func ParseClients(js string) (map[string]Client, error) {
 	clients := map[string]Client{}
 	if js == "" {
 		return clients, nil
 	}
-	if err := json.Unmarshal([]byte(js), &clients); err != nil {
-		return nil, fmt.Errorf("BRIDGE_CLIENTS: %w", err)
+	// Unknown fields are refused: a leftover token_sha256 or a typo in
+	// "subscribe" would otherwise be dropped silently.
+	dec := json.NewDecoder(strings.NewReader(js))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&clients); err != nil {
+		return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("BRIDGE_API_CLIENTS: data after the client table")
 	}
 	for name, c := range clients {
 		if name == "" || strings.Contains(name, "/") {
-			return nil, fmt.Errorf("BRIDGE_CLIENTS: bad client name %q", name)
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: bad client name %q", name)
 		}
-		if b, err := hex.DecodeString(c.TokenSHA256); err != nil || len(b) != sha256.Size {
-			return nil, fmt.Errorf("BRIDGE_CLIENTS: %s: token_sha256 is not a hex sha256", name)
+		if c.Privileged && name != PrivilegedClient {
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: only %s may be privileged", name, PrivilegedClient)
 		}
 		if c.Kind == "" {
 			c.Kind = event.ActorMachine
 		}
 		if !validActor(c.Kind) {
-			return nil, fmt.Errorf("BRIDGE_CLIENTS: %s: unknown kind %q", name, c.Kind)
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: unknown kind %q", name, c.Kind)
 		}
-		c.Name, c.TokenSHA256 = name, strings.ToLower(c.TokenSHA256)
+		if err := typePrefixes(c.PublishTypes); err != nil {
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_types: %w", name, err)
+		}
+		if err := subjectPrefixes(c.PublishSubjects); err != nil {
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_subjects: %w", name, err)
+		}
+		for i, r := range c.Subscribe {
+			if len(r.Types) == 0 || len(r.Subjects) == 0 {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d needs types and subjects", name, i)
+			}
+			if err := typePrefixes(r.Types); err != nil {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d: %w", name, i, err)
+			}
+			if err := subjectPrefixes(r.Subjects); err != nil {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: subscribe rule %d: %w", name, i, err)
+			}
+		}
+		c.Name = name
 		clients[name] = c
 	}
 	return clients, nil
+}
+
+// typePrefixes: written with their final dot, so a name never matches a
+// longer one by accident (dev.bnei.game. is not dev.bnei.gamex).
+func typePrefixes(ps []string) error {
+	for _, p := range ps {
+		if !strings.HasSuffix(p, ".") {
+			return fmt.Errorf("type prefix %q must end with a dot", p)
+		}
+	}
+	return nil
+}
+
+// subjectPrefixes: "" (any subject) or ending with a slash, for the same
+// reason (fleet/client/game/ is not fleet/client/gameother/).
+func subjectPrefixes(ps []string) error {
+	for _, p := range ps {
+		if p != "" && !strings.HasSuffix(p, "/") {
+			return fmt.Errorf("subject prefix %q must end with a slash", p)
+		}
+	}
+	return nil
+}
+
+// covers: rule r admits a subscription asking for types and subjects. Every
+// requested type starts with one of r's type prefixes; every subject glob's
+// literal head (up to its first * or ?) starts with one of r's subject
+// prefixes. An empty request list matches everything, so it is admitted only
+// where r allows everything: never for types, for subjects only with "".
+func covers(r Rule, types, subjects []string) bool {
+	if len(types) == 0 {
+		return false
+	}
+	for _, t := range types {
+		if !slices.ContainsFunc(r.Types, func(p string) bool { return strings.HasPrefix(t, p) }) {
+			return false
+		}
+	}
+	if slices.Contains(r.Subjects, "") {
+		return true
+	}
+	if len(subjects) == 0 {
+		return false
+	}
+	for _, g := range subjects {
+		head := g
+		if i := strings.IndexAny(g, "*?"); i >= 0 {
+			head = g[:i]
+		}
+		if !slices.ContainsFunc(r.Subjects, func(p string) bool { return strings.HasPrefix(head, p) }) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c Client) mayRead(types, subjects []string) bool {
+	return slices.ContainsFunc(c.Subscribe, func(r Rule) bool { return covers(r, types, subjects) })
 }
 
 func validActor(a string) bool {
 	return slices.Contains([]string{event.ActorHuman, event.ActorBot, event.ActorAgent, event.ActorMachine}, a)
 }
 
+// Verifier checks a bearer token and returns its subject and expiry
+// (auth.Verifier in production).
+type Verifier interface {
+	Verify(raw string) (sub string, exp time.Time, err error)
+}
+
 type Server struct {
 	st      *store.Store
 	clients map[string]Client
+	tokens  Verifier
 
 	mu   sync.Mutex
 	live map[string]*stream // subscription name -> its one active Subscribe
@@ -100,42 +196,80 @@ type outcome struct {
 	delay    time.Duration // wait before the next delivery
 }
 
-func New(st *store.Store, clients map[string]Client) *Server {
-	return &Server{st: st, clients: clients, live: map[string]*stream{}}
+func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
+	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}}
 }
 
 // Handler mounts the service on a mux.
 func (s *Server) Handler() (string, http.Handler) { return bridgev1connect.NewBridgeServiceHandler(s) }
 
-func (s *Server) auth(h http.Header) (Client, error) {
+// errExpired ends a stream at its token's exp, so the client reconnects with
+// a fresh one (ADR-0066 §1: deactivating an account takes effect within one
+// token lifetime).
+var errExpired = errors.New("token expired")
+
+func (s *Server) auth(h http.Header) (Client, time.Time, error) {
 	tok, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || tok == "" {
-		return Client{}, connect.NewError(connect.CodeUnauthenticated, errors.New("bearer token required"))
+		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, errors.New("bearer token required"))
 	}
-	sum := sha256.Sum256([]byte(tok))
-	got := []byte(hex.EncodeToString(sum[:]))
-	for _, c := range s.clients {
-		if subtle.ConstantTimeCompare(got, []byte(c.TokenSHA256)) == 1 {
-			return c, nil
-		}
+	sub, exp, err := s.tokens.Verify(tok)
+	if err != nil {
+		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, err)
 	}
-	return Client{}, connect.NewError(connect.CodeUnauthenticated, errors.New("unknown token"))
+	c, ok := s.clients[sub]
+	if !ok {
+		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("%s is not a bridge client", sub))
+	}
+	return c, exp, nil
 }
 
 // owns: a client subscribes as itself or under "<name>/...".
-func (s *Server) owns(h http.Header, sub string) (Client, error) {
-	c, err := s.auth(h)
+func (s *Server) owns(h http.Header, sub string) (Client, time.Time, error) {
+	c, exp, err := s.auth(h)
 	if err != nil {
-		return c, err
+		return c, exp, err
 	}
-	if !c.Subscribe || (sub != c.Name && !strings.HasPrefix(sub, c.Name+"/")) {
-		return c, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
+	if len(c.Subscribe) == 0 || (sub != c.Name && !strings.HasPrefix(sub, c.Name+"/")) {
+		return c, exp, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
 	}
-	return c, nil
+	return c, exp, nil
+}
+
+// MinStreamLife: a token with less left cannot open a stream, which would
+// end at once and loop the client. Under golang.org/x/oauth2's 10 s refresh
+// delta, so a client reconnecting with its cached token is not refused.
+var MinStreamLife = 5 * time.Second
+
+// untilExpiry bounds a stream by its token: it ends at exp. An event in
+// flight then is redelivered on the next stream, as after any disconnect.
+func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.CancelFunc, error) {
+	if exp.Before(time.Now().Add(MinStreamLife)) {
+		return nil, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("token too close to expiry to open a stream"))
+	}
+	ctx, cancel := context.WithDeadlineCause(ctx, exp, errExpired)
+	return ctx, cancel, nil
+}
+
+// ended: the stream stopped because its token expired.
+func ended(ctx context.Context) error {
+	if errors.Is(context.Cause(ctx), errExpired) {
+		return connect.NewError(connect.CodeUnauthenticated, errExpired)
+	}
+	return nil
+}
+
+// unavailable is a store error on a bounded stream: Unauthenticated when the
+// token's deadline caused it, so the client refreshes instead of retrying.
+func unavailable(ctx context.Context, err error) error {
+	if e := ended(ctx); e != nil {
+		return e
+	}
+	return connect.NewError(connect.CodeUnavailable, err)
 }
 
 func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
-	c, err := s.auth(req.Header())
+	c, _, err := s.auth(req.Header())
 	if err != nil {
 		return nil, err
 	}
@@ -194,12 +328,21 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 
 func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.SubscribeRequest], out *connect.ServerStream[bridgev1.SubscribeResponse]) error {
 	name := req.Msg.GetName()
-	if _, err := s.owns(req.Header(), name); err != nil {
+	c, exp, err := s.owns(req.Header(), name)
+	if err != nil {
 		return err
 	}
+	if !c.mayRead(req.Msg.GetTypes(), req.Msg.GetSubjects()) {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not read that filter", c.Name))
+	}
+	ctx, cancel, err := untilExpiry(ctx, exp)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	cursor, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, err)
+		return unavailable(ctx, err)
 	}
 	// Send headers now: the client's call returns once the subscription is
 	// registered, so a Publish made after it is never missed.
@@ -207,7 +350,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel = context.WithCancel(ctx)
 	me := &stream{cancel: cancel, done: make(chan outcome, 1)}
 	s.mu.Lock()
 	if old := s.live[name]; old != nil {
@@ -228,15 +371,15 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		wake := s.st.Wake()
 		ds, err := s.st.Match(ctx, name, cursor, 1)
 		if ctx.Err() != nil {
-			return nil
+			return ended(ctx)
 		}
 		if err != nil {
-			return connect.NewError(connect.CodeUnavailable, err)
+			return unavailable(ctx, err)
 		}
 		if len(ds) == 0 {
 			select {
 			case <-ctx.Done():
-				return nil
+				return ended(ctx)
 			case <-wake:
 			case <-time.After(PollEvery):
 			}
@@ -245,7 +388,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		d := ds[0]
 		if d.Parked {
 			if err := s.st.DeadLetter(ctx, name, d.Event, "subject parked"); err != nil {
-				return connect.NewError(connect.CodeUnavailable, err)
+				return unavailable(ctx, err)
 			}
 			cursor = d.Seq
 			continue
@@ -258,14 +401,14 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return ended(ctx)
 		case o := <-me.done:
 			if o.advanced {
 				cursor = d.Seq
 			}
 			select {
 			case <-ctx.Done():
-				return nil
+				return ended(ctx)
 			case <-time.After(o.delay):
 			}
 		}
@@ -288,7 +431,7 @@ func (s *Server) claim(sub string, seq int64) (*stream, event.Event, error) {
 
 func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckRequest]) (*connect.Response[bridgev1.AckResponse], error) {
 	sub, seq := req.Msg.GetSubscription(), req.Msg.GetSeq()
-	if _, err := s.owns(req.Header(), sub); err != nil {
+	if _, _, err := s.owns(req.Header(), sub); err != nil {
 		return nil, err
 	}
 	st, _, err := s.claim(sub, seq)
@@ -308,7 +451,7 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 // an event in flight if that shows up.
 func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackRequest]) (*connect.Response[bridgev1.NackResponse], error) {
 	sub, seq := req.Msg.GetSubscription(), req.Msg.GetSeq()
-	if _, err := s.owns(req.Header(), sub); err != nil {
+	if _, _, err := s.owns(req.Header(), sub); err != nil {
 		return nil, err
 	}
 	st, e, err := s.claim(sub, seq)
@@ -343,17 +486,35 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 
 func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.ReplayRequest], out *connect.ServerStream[bridgev1.ReplayResponse]) error {
 	sub := req.Msg.GetSubscription()
-	if _, err := s.owns(req.Header(), sub); err != nil {
+	c, exp, err := s.owns(req.Header(), sub)
+	if err != nil {
 		return err
+	}
+	ctx, cancel, err := untilExpiry(ctx, exp)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	// Replay reads with the filter stored by Subscribe: re-check it, so a
+	// client that lost a right cannot read history with it.
+	types, subjects, found, err := s.st.Filter(ctx, sub)
+	if err != nil {
+		return unavailable(ctx, err)
+	}
+	if !found {
+		return connect.NewError(connect.CodeNotFound, fmt.Errorf("no subscription %q", sub))
+	}
+	if !c.mayRead(types, subjects) {
+		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may no longer read %q's filter", c.Name, sub))
 	}
 	head, err := s.st.Head(ctx)
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, err)
+		return unavailable(ctx, err)
 	}
 	for after := max(req.Msg.GetFromSeq()-1, 0); after < head; {
 		ds, err := s.st.Match(ctx, sub, after, 100)
 		if err != nil {
-			return connect.NewError(connect.CodeUnavailable, err)
+			return unavailable(ctx, err)
 		}
 		if len(ds) == 0 {
 			return nil

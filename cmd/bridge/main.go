@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
+	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
@@ -29,10 +30,23 @@ func main() {
 		slog.Error("BRIDGE_GITHUB_WEBHOOK_SECRET is required")
 		os.Exit(1)
 	}
-	clients, err := bus.ParseClients(os.Getenv("BRIDGE_CLIENTS"))
+	// API clients are authentik service accounts (infra-bootstrap ADR-0066):
+	// the table holds permissions, the pinned certificate is the trust anchor.
+	if os.Getenv("BRIDGE_CLIENTS") != "" {
+		slog.Warn("BRIDGE_CLIENTS is ignored: clients sign in through authentik (BRIDGE_API_CLIENTS)")
+	}
+	clients, err := bus.ParseClients(os.Getenv("BRIDGE_API_CLIENTS"))
 	if err != nil {
 		slog.Error("clients", "err", err)
 		os.Exit(1)
+	}
+	tokens, err := auth.New(os.Getenv("BRIDGE_OIDC_ISSUER"), os.Getenv("BRIDGE_OIDC_CLIENT_ID"), os.Getenv("BRIDGE_OIDC_CERT"))
+	if err != nil {
+		slog.Error("oidc", "err", err)
+		os.Exit(1)
+	}
+	if !tokens.Pinned() {
+		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
 	}
 	st, err := store.Open(ctx, os.Getenv("BRIDGE_DATABASE_URL"))
 	if err != nil {
@@ -47,13 +61,16 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
-	mux.Handle(bus.New(st, clients).Handler())
+	mux.Handle(bus.New(st, clients, tokens).Handler())
 
 	// Unset token: both answer 503 rather than serve open.
 	alertToken := os.Getenv("BRIDGE_ALERT_TOKEN")
 	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", alertToken, st.Insert))
 	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", alertToken, st.Insert))
 
+	if u := os.Getenv("BRIDGE_OIDC_JWKS_URL"); u != "" {
+		go tokens.Watch(ctx, u, &http.Client{Timeout: 10 * time.Second}, time.Hour)
+	}
 	if r := reconciler(st); r != nil {
 		go r.Loop(ctx, 10*time.Minute)
 	}
