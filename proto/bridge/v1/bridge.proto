@@ -48,6 +48,9 @@ service BridgeService {
   // Replay re-streams logged events from from_seq up to the current head with
   // replayed=true. It needs no ack and moves no cursor.
   rpc Replay(ReplayRequest) returns (stream ReplayResponse);
+  // ConfirmGap clears the subscription's gap once the subscriber resynced. It
+  // is accepted only from the live stream that sent that version.
+  rpc ConfirmGap(ConfirmGapRequest) returns (ConfirmGapResponse);
 }
 
 message PublishRequest {
@@ -73,8 +76,8 @@ message SubscribeResponse {
   // Unset on the message that carries a gap.
   CloudEvent event = 1;
   // Sent first when retention deleted matching events this subscription
-  // never acked: resync from your own source of truth, then confirm it with
-  // Ack{gap_version}. Sent again on every reconnect until confirmed.
+  // never acked: resync from your own source of truth, then ConfirmGap with
+  // its version. Sent again on every reconnect until confirmed.
   Gap gap = 2;
 }
 
@@ -83,21 +86,26 @@ message SubscribeResponse {
 message Gap {
   int64 from_seq = 1;
   int64 to_seq = 2;
-  // On Subscribe: what Ack{gap_version} confirms. A deletion run that widens
-  // the gap bumps it, so a confirmation of an older gap does nothing. Unset
-  // on Replay, whose gap needs no confirmation.
+  // On Subscribe: what ConfirmGap confirms, starting at 1. A deletion run that
+  // widens the gap bumps it, and confirming an older version is
+  // FailedPrecondition: reconnect for the current one. 0 on Replay, whose gap
+  // needs no confirmation.
   int64 version = 3;
 }
 
 message AckRequest {
   string subscription = 1;
   int64 seq = 2;
-  // With seq 0: confirms the subscription's gap of this version, once
-  // resynced. Nothing else is acked.
-  int64 gap_version = 3;
 }
 
 message AckResponse {}
+
+message ConfirmGapRequest {
+  string subscription = 1;
+  int64 version = 2;
+}
+
+message ConfirmGapResponse {}
 
 message NackRequest {
   string subscription = 1;

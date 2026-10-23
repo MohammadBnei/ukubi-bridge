@@ -505,7 +505,7 @@ func TestRetentionGap(t *testing.T) {
 	}
 	g := again.Msg().Gap
 	confirm := func(v int64) error {
-		_, err := f.api.Ack(ctx, as("core-token", &bridgev1.AckRequest{Subscription: "bridge-core/ret", GapVersion: v}))
+		_, err := f.api.ConfirmGap(ctx, as("core-token", &bridgev1.ConfirmGapRequest{Subscription: "bridge-core/ret", Version: v}))
 		return err
 	}
 	if err := confirm(g.Version + 1); connect.CodeOf(err) != connect.CodeFailedPrecondition {
@@ -521,8 +521,11 @@ func TestRetentionGap(t *testing.T) {
 	if gapTo != nil {
 		t.Fatal("a confirmed gap was not cleared")
 	}
-	if err := confirm(g.Version); connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Fatalf("confirming twice: %v, want FailedPrecondition", err)
+	if err := confirm(g.Version); err != nil {
+		t.Fatalf("confirming twice: %v, want OK (a retried confirmation)", err)
+	}
+	if err := confirm(0); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("version 0: %v, want InvalidArgument", err)
 	}
 
 	rs, err := f.api.Replay(ctx, as("core-token", &bridgev1.ReplayRequest{Subscription: "bridge-core/ret", FromSeq: 1}))

@@ -188,6 +188,7 @@ type Server struct {
 type stream struct {
 	cancel   context.CancelCauseFunc
 	inflight event.Event
+	sentGap  int64        // version of the gap this stream sent, 0 if none
 	done     chan outcome // buffered 1: written once per claimed delivery
 }
 
@@ -353,10 +354,10 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	defer cancel()
 
 	// A deletion run that gaps this subscription between this read and the
-	// registration below misses this stream: it then runs on the older cursor
-	// (Match skips deleted rows) and the new gap waits in the store, confirmed
-	// by no one, until the next reconnect sends it, at most one token later.
-	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+	// registration below would miss this stream: after registering, the gap
+	// version is read again and a change ends the stream, so it reconnects to
+	// the new gap.
+	cursor, gap, readVer, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
 		return unavailable(ctx, err)
 	}
@@ -377,6 +378,11 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		s.mu.Unlock()
 		stop(nil)
 	}()
+	if v, err := s.st.GapVersion(ctx, name); err != nil {
+		return unavailable(ctx, err)
+	} else if v != readVer {
+		return connect.NewError(connect.CodeAborted, errGapped) // gapped in between: reconnect to it
+	}
 
 	// Send headers now: the client's call returns once the subscription is
 	// registered, so a Publish made after it is never missed.
@@ -387,6 +393,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To, Version: gap.Version}}); err != nil {
 			return err
 		}
+		s.mu.Lock()
+		me.sentGap = gap.Version
+		s.mu.Unlock()
 	}
 
 	for {
@@ -480,17 +489,6 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	if _, _, err := s.owns(req.Header(), sub); err != nil {
 		return nil, err
 	}
-	if v := req.Msg.GetGapVersion(); seq == 0 && v > 0 {
-		cleared, err := s.st.ClearGap(ctx, sub, v)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeUnavailable, err)
-		}
-		if !cleared {
-			// Widened since it was sent (or already confirmed): reconnect for the current one.
-			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d of %q is not current", v, sub))
-		}
-		return connect.NewResponse(&bridgev1.AckResponse{}), nil
-	}
 	st, _, err := s.claim(sub, seq)
 	if err != nil {
 		return nil, err
@@ -501,6 +499,35 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.AckResponse{}), nil
+}
+
+// ConfirmGap clears a gap the subscriber resynced from. Only the live stream
+// that sent that version may confirm it, so a confirmation cannot run ahead
+// of the gap message; confirming twice is fine, an older version is
+// FailedPrecondition (a later run widened it: reconnect for the new one).
+func (s *Server) ConfirmGap(ctx context.Context, req *connect.Request[bridgev1.ConfirmGapRequest]) (*connect.Response[bridgev1.ConfirmGapResponse], error) {
+	sub, v := req.Msg.GetSubscription(), req.Msg.GetVersion()
+	if _, _, err := s.owns(req.Header(), sub); err != nil {
+		return nil, err
+	}
+	if v <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("version must be positive"))
+	}
+	s.mu.Lock()
+	st := s.live[sub]
+	sent := st != nil && st.sentGap == v
+	s.mu.Unlock()
+	if !sent {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("no live stream on %q sent gap version %d", sub, v))
+	}
+	current, err := s.st.ClearGap(ctx, sub, v)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeUnavailable, err)
+	}
+	if !current {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d of %q is not current: reconnect", v, sub))
+	}
+	return connect.NewResponse(&bridgev1.ConfirmGapResponse{}), nil
 }
 
 // ponytail: only Nacks count as failures. A subscriber that crashes on an

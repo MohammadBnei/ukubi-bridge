@@ -338,8 +338,8 @@ type SubscribeResponse struct {
 	// Unset on the message that carries a gap.
 	Event *CloudEvent `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
 	// Sent first when retention deleted matching events this subscription
-	// never acked: resync from your own source of truth, then confirm it with
-	// Ack{gap_version}. Sent again on every reconnect until confirmed.
+	// never acked: resync from your own source of truth, then ConfirmGap with
+	// its version. Sent again on every reconnect until confirmed.
 	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -395,9 +395,10 @@ type Gap struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	FromSeq int64                  `protobuf:"varint,1,opt,name=from_seq,json=fromSeq,proto3" json:"from_seq,omitempty"`
 	ToSeq   int64                  `protobuf:"varint,2,opt,name=to_seq,json=toSeq,proto3" json:"to_seq,omitempty"`
-	// On Subscribe: what Ack{gap_version} confirms. A deletion run that widens
-	// the gap bumps it, so a confirmation of an older gap does nothing. Unset
-	// on Replay, whose gap needs no confirmation.
+	// On Subscribe: what ConfirmGap confirms, starting at 1. A deletion run that
+	// widens the gap bumps it, and confirming an older version is
+	// FailedPrecondition: reconnect for the current one. 0 on Replay, whose gap
+	// needs no confirmation.
 	Version       int64 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -455,12 +456,9 @@ func (x *Gap) GetVersion() int64 {
 }
 
 type AckRequest struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Subscription string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
-	Seq          int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
-	// With seq 0: confirms the subscription's gap of this version, once
-	// resynced. Nothing else is acked.
-	GapVersion    int64 `protobuf:"varint,3,opt,name=gap_version,json=gapVersion,proto3" json:"gap_version,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Subscription  string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
+	Seq           int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -509,13 +507,6 @@ func (x *AckRequest) GetSeq() int64 {
 	return 0
 }
 
-func (x *AckRequest) GetGapVersion() int64 {
-	if x != nil {
-		return x.GapVersion
-	}
-	return 0
-}
-
 type AckResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -552,6 +543,94 @@ func (*AckResponse) Descriptor() ([]byte, []int) {
 	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{7}
 }
 
+type ConfirmGapRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Subscription  string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
+	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmGapRequest) Reset() {
+	*x = ConfirmGapRequest{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmGapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmGapRequest) ProtoMessage() {}
+
+func (x *ConfirmGapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmGapRequest.ProtoReflect.Descriptor instead.
+func (*ConfirmGapRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ConfirmGapRequest) GetSubscription() string {
+	if x != nil {
+		return x.Subscription
+	}
+	return ""
+}
+
+func (x *ConfirmGapRequest) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+type ConfirmGapResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmGapResponse) Reset() {
+	*x = ConfirmGapResponse{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmGapResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmGapResponse) ProtoMessage() {}
+
+func (x *ConfirmGapResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmGapResponse.ProtoReflect.Descriptor instead.
+func (*ConfirmGapResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{9}
+}
+
 type NackRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Subscription  string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
@@ -563,7 +642,7 @@ type NackRequest struct {
 
 func (x *NackRequest) Reset() {
 	*x = NackRequest{}
-	mi := &file_bridge_v1_bridge_proto_msgTypes[8]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -575,7 +654,7 @@ func (x *NackRequest) String() string {
 func (*NackRequest) ProtoMessage() {}
 
 func (x *NackRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_v1_bridge_proto_msgTypes[8]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -588,7 +667,7 @@ func (x *NackRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NackRequest.ProtoReflect.Descriptor instead.
 func (*NackRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{8}
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *NackRequest) GetSubscription() string {
@@ -620,7 +699,7 @@ type NackResponse struct {
 
 func (x *NackResponse) Reset() {
 	*x = NackResponse{}
-	mi := &file_bridge_v1_bridge_proto_msgTypes[9]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -632,7 +711,7 @@ func (x *NackResponse) String() string {
 func (*NackResponse) ProtoMessage() {}
 
 func (x *NackResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_v1_bridge_proto_msgTypes[9]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -645,7 +724,7 @@ func (x *NackResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NackResponse.ProtoReflect.Descriptor instead.
 func (*NackResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{9}
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{11}
 }
 
 type ReplayRequest struct {
@@ -658,7 +737,7 @@ type ReplayRequest struct {
 
 func (x *ReplayRequest) Reset() {
 	*x = ReplayRequest{}
-	mi := &file_bridge_v1_bridge_proto_msgTypes[10]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -670,7 +749,7 @@ func (x *ReplayRequest) String() string {
 func (*ReplayRequest) ProtoMessage() {}
 
 func (x *ReplayRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_v1_bridge_proto_msgTypes[10]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -683,7 +762,7 @@ func (x *ReplayRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplayRequest.ProtoReflect.Descriptor instead.
 func (*ReplayRequest) Descriptor() ([]byte, []int) {
-	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{10}
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ReplayRequest) GetSubscription() string {
@@ -714,7 +793,7 @@ type ReplayResponse struct {
 
 func (x *ReplayResponse) Reset() {
 	*x = ReplayResponse{}
-	mi := &file_bridge_v1_bridge_proto_msgTypes[11]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +805,7 @@ func (x *ReplayResponse) String() string {
 func (*ReplayResponse) ProtoMessage() {}
 
 func (x *ReplayResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_v1_bridge_proto_msgTypes[11]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +818,7 @@ func (x *ReplayResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplayResponse.ProtoReflect.Descriptor instead.
 func (*ReplayResponse) Descriptor() ([]byte, []int) {
-	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{11}
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ReplayResponse) GetEvent() *CloudEvent {
@@ -793,14 +872,16 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x03Gap\x12\x19\n" +
 	"\bfrom_seq\x18\x01 \x01(\x03R\afromSeq\x12\x15\n" +
 	"\x06to_seq\x18\x02 \x01(\x03R\x05toSeq\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x03R\aversion\"c\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\"B\n" +
 	"\n" +
 	"AckRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x1f\n" +
-	"\vgap_version\x18\x03 \x01(\x03R\n" +
-	"gapVersion\"\r\n" +
-	"\vAckResponse\"[\n" +
+	"\x03seq\x18\x02 \x01(\x03R\x03seq\"\r\n" +
+	"\vAckResponse\"Q\n" +
+	"\x11ConfirmGapRequest\x12\"\n" +
+	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\"\x14\n" +
+	"\x12ConfirmGapResponse\"[\n" +
 	"\vNackRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x16\n" +
@@ -811,13 +892,15 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\"_\n" +
 	"\x0eReplayResponse\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\x12 \n" +
-	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap2\xcb\x02\n" +
+	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap2\x96\x03\n" +
 	"\rBridgeService\x12@\n" +
 	"\aPublish\x12\x19.bridge.v1.PublishRequest\x1a\x1a.bridge.v1.PublishResponse\x12H\n" +
 	"\tSubscribe\x12\x1b.bridge.v1.SubscribeRequest\x1a\x1c.bridge.v1.SubscribeResponse0\x01\x124\n" +
 	"\x03Ack\x12\x15.bridge.v1.AckRequest\x1a\x16.bridge.v1.AckResponse\x127\n" +
 	"\x04Nack\x12\x16.bridge.v1.NackRequest\x1a\x17.bridge.v1.NackResponse\x12?\n" +
-	"\x06Replay\x12\x18.bridge.v1.ReplayRequest\x1a\x19.bridge.v1.ReplayResponse0\x01BFZDgithub.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1;bridgev1b\x06proto3"
+	"\x06Replay\x12\x18.bridge.v1.ReplayRequest\x1a\x19.bridge.v1.ReplayResponse0\x01\x12I\n" +
+	"\n" +
+	"ConfirmGap\x12\x1c.bridge.v1.ConfirmGapRequest\x1a\x1d.bridge.v1.ConfirmGapResponseBFZDgithub.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1;bridgev1b\x06proto3"
 
 var (
 	file_bridge_v1_bridge_proto_rawDescOnce sync.Once
@@ -831,7 +914,7 @@ func file_bridge_v1_bridge_proto_rawDescGZIP() []byte {
 	return file_bridge_v1_bridge_proto_rawDescData
 }
 
-var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*CloudEvent)(nil),            // 0: bridge.v1.CloudEvent
 	(*PublishRequest)(nil),        // 1: bridge.v1.PublishRequest
@@ -841,14 +924,16 @@ var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*Gap)(nil),                   // 5: bridge.v1.Gap
 	(*AckRequest)(nil),            // 6: bridge.v1.AckRequest
 	(*AckResponse)(nil),           // 7: bridge.v1.AckResponse
-	(*NackRequest)(nil),           // 8: bridge.v1.NackRequest
-	(*NackResponse)(nil),          // 9: bridge.v1.NackResponse
-	(*ReplayRequest)(nil),         // 10: bridge.v1.ReplayRequest
-	(*ReplayResponse)(nil),        // 11: bridge.v1.ReplayResponse
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(*ConfirmGapRequest)(nil),     // 8: bridge.v1.ConfirmGapRequest
+	(*ConfirmGapResponse)(nil),    // 9: bridge.v1.ConfirmGapResponse
+	(*NackRequest)(nil),           // 10: bridge.v1.NackRequest
+	(*NackResponse)(nil),          // 11: bridge.v1.NackResponse
+	(*ReplayRequest)(nil),         // 12: bridge.v1.ReplayRequest
+	(*ReplayResponse)(nil),        // 13: bridge.v1.ReplayResponse
+	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
 }
 var file_bridge_v1_bridge_proto_depIdxs = []int32{
-	12, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
+	14, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: bridge.v1.PublishRequest.event:type_name -> bridge.v1.CloudEvent
 	0,  // 2: bridge.v1.SubscribeResponse.event:type_name -> bridge.v1.CloudEvent
 	5,  // 3: bridge.v1.SubscribeResponse.gap:type_name -> bridge.v1.Gap
@@ -857,15 +942,17 @@ var file_bridge_v1_bridge_proto_depIdxs = []int32{
 	1,  // 6: bridge.v1.BridgeService.Publish:input_type -> bridge.v1.PublishRequest
 	3,  // 7: bridge.v1.BridgeService.Subscribe:input_type -> bridge.v1.SubscribeRequest
 	6,  // 8: bridge.v1.BridgeService.Ack:input_type -> bridge.v1.AckRequest
-	8,  // 9: bridge.v1.BridgeService.Nack:input_type -> bridge.v1.NackRequest
-	10, // 10: bridge.v1.BridgeService.Replay:input_type -> bridge.v1.ReplayRequest
-	2,  // 11: bridge.v1.BridgeService.Publish:output_type -> bridge.v1.PublishResponse
-	4,  // 12: bridge.v1.BridgeService.Subscribe:output_type -> bridge.v1.SubscribeResponse
-	7,  // 13: bridge.v1.BridgeService.Ack:output_type -> bridge.v1.AckResponse
-	9,  // 14: bridge.v1.BridgeService.Nack:output_type -> bridge.v1.NackResponse
-	11, // 15: bridge.v1.BridgeService.Replay:output_type -> bridge.v1.ReplayResponse
-	11, // [11:16] is the sub-list for method output_type
-	6,  // [6:11] is the sub-list for method input_type
+	10, // 9: bridge.v1.BridgeService.Nack:input_type -> bridge.v1.NackRequest
+	12, // 10: bridge.v1.BridgeService.Replay:input_type -> bridge.v1.ReplayRequest
+	8,  // 11: bridge.v1.BridgeService.ConfirmGap:input_type -> bridge.v1.ConfirmGapRequest
+	2,  // 12: bridge.v1.BridgeService.Publish:output_type -> bridge.v1.PublishResponse
+	4,  // 13: bridge.v1.BridgeService.Subscribe:output_type -> bridge.v1.SubscribeResponse
+	7,  // 14: bridge.v1.BridgeService.Ack:output_type -> bridge.v1.AckResponse
+	11, // 15: bridge.v1.BridgeService.Nack:output_type -> bridge.v1.NackResponse
+	13, // 16: bridge.v1.BridgeService.Replay:output_type -> bridge.v1.ReplayResponse
+	9,  // 17: bridge.v1.BridgeService.ConfirmGap:output_type -> bridge.v1.ConfirmGapResponse
+	12, // [12:18] is the sub-list for method output_type
+	6,  // [6:12] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -882,7 +969,7 @@ func file_bridge_v1_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_v1_bridge_proto_rawDesc), len(file_bridge_v1_bridge_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

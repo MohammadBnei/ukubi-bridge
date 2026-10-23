@@ -61,6 +61,8 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     dead-letters it, which **parks its subject** for that subscription: later
     events on the subject go straight to `dead_letters` too, so a thread is
     never processed out of order.
+  - `ConfirmGap(subscription, version)` — clears a gap once resynced (see
+    Retention).
   - `Replay(subscription, from_seq)` — streams the subscription's matching
     events from `from_seq` to the current head with `replayed=true`, after
     checking the stored filter still fits the client's rules (`NotFound` for a
@@ -86,11 +88,13 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
 - A subscription that loses a matching event it never acked records a **gap**
   (widened by later runs, never replaced). Its next `Subscribe` sends one
   message carrying `gap {from_seq, to_seq, version}` before any event: resync
-  from your own source of truth, then confirm it with `Ack{subscription,
-  gap_version: version}` (seq 0). Its live stream ends `Aborted`, so it
-  reconnects to that gap. The gap is sent on every reconnect until confirmed;
-  a run that widens it bumps `version`, so confirming an older one is
-  `FailedPrecondition` (reconnect for the current one). An Ack never moves a
+  from your own source of truth, then call `ConfirmGap(subscription,
+  version)` on that same live stream's subscription. Its live stream ends
+  `Aborted`, so it reconnects to that gap (also when a run gaps it while it is
+  connecting). The gap is sent on every reconnect until confirmed; a run that
+  widens it bumps `version`, so confirming an older one is `FailedPrecondition`
+  (reconnect for the current one). Confirming twice is fine; confirming
+  without a live stream that sent that version is refused. An Ack never moves a
   cursor back. A stream replaced by a newer `Subscribe` on the same name ends
   cleanly: do not reconnect on that.
 - A dead letter is never recorded for an event already deleted.

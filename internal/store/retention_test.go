@@ -52,7 +52,7 @@ func TestPrune(t *testing.T) {
 	for _, sub := range []struct{ name, types, subjects string }{
 		{"quiet", "dev.q.", ""}, {"lagging", "dev.a.", ""}, {"parked", "dev.a.", ""}, {"ahead", "dev.a.", ""},
 	} {
-		if _, _, err := s.Subscribe(ctx, sub.name, []string{sub.types}, nil); err != nil {
+		if _, _, _, err := s.Subscribe(ctx, sub.name, []string{sub.types}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +132,7 @@ func TestPrune(t *testing.T) {
 
 	// Subscribe reports the gap with its version; an Ack never moves the
 	// cursor back; only the current version's confirmation clears it.
-	_, gap, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil)
+	_, gap, _, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil)
 	if err != nil || gap == nil || gap.From != 2 || gap.To != 6 || gap.Version != 1 {
 		t.Fatalf("subscribe gap %+v %v", gap, err)
 	}
@@ -147,6 +147,9 @@ func TestPrune(t *testing.T) {
 	}
 	if ok, err := s.ClearGap(ctx, "lagging", gap.Version); err != nil || !ok {
 		t.Fatalf("the confirmed gap was not cleared: %v %v", ok, err)
+	}
+	if ok, err := s.ClearGap(ctx, "lagging", gap.Version); err != nil || !ok {
+		t.Fatalf("confirming twice is not idempotent: %v %v", ok, err)
 	}
 	if _, from, _ := cursorGap(t, s, "lagging"); from != nil {
 		t.Fatal("gap still stored")
@@ -176,7 +179,7 @@ func TestPruneWidensGap(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
 	cutoff := time.Now().Add(-30 * 24 * time.Hour)
-	if _, _, err := s.Subscribe(ctx, "w", []string{"dev."}, nil); err != nil {
+	if _, _, _, err := s.Subscribe(ctx, "w", []string{"dev."}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 4 {
@@ -238,7 +241,7 @@ func TestDeadLetterAfterPrune(t *testing.T) {
 		t.Fatal("a dead letter was recorded for a deleted event, parking its subject")
 	}
 	// A new subscription starts at or past the watermark, never below it.
-	if c, _, err := s.Subscribe(ctx, "late", []string{"dev."}, nil); err != nil || c < 1 {
+	if c, _, _, err := s.Subscribe(ctx, "late", []string{"dev."}, nil); err != nil || c < 1 {
 		t.Fatalf("new subscription cursor %d %v", c, err)
 	}
 }

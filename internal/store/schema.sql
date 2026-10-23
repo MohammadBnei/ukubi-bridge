@@ -54,6 +54,7 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_to   bigint;
 -- Bumped whenever a run records or widens the gap: only a confirmation of the
 -- current version clears it.
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_ver  bigint NOT NULL DEFAULT 0;
+UPDATE subscriptions SET gap_ver = 1 WHERE gap_from IS NOT NULL AND gap_ver = 0; -- versions start at 1
 
 -- One row: the log position deleted through. Replay from at or below it
 -- starts with a gap.

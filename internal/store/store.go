@@ -143,10 +143,10 @@ func Invalid(err error) bool {
 // matching events in it (infra-bootstrap ADR-0066 §6).
 type Gap struct{ From, To, Version int64 }
 
-// Subscribe creates or refilters subscription name and returns its cursor and
-// any gap it has not confirmed. A new subscription starts at the head of
+// Subscribe creates or refilters subscription name and returns its cursor,
+// any gap it has not confirmed, and its gap version (stored even once confirmed). A new subscription starts at the head of
 // the log: history is Replay's job.
-func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []string) (int64, *Gap, error) {
+func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []string) (int64, *Gap, int64, error) {
 	var cursor, ver int64
 	var from, to *int64
 	err := s.db.QueryRow(ctx, `
@@ -156,9 +156,9 @@ func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []st
 		SET types = excluded.types, subjects = excluded.subjects, last_seen = now()
 		RETURNING last_acked_id, gap_from, gap_to, gap_ver`, name, nonNil(types), nonNil(subjects)).Scan(&cursor, &from, &to, &ver)
 	if err != nil || from == nil || to == nil {
-		return cursor, nil, err
+		return cursor, nil, ver, err
 	}
-	return cursor, &Gap{*from, *to, ver}, nil
+	return cursor, &Gap{*from, *to, ver}, ver, nil
 }
 
 // Filter returns subscription name's stored filter; found is false when it does not exist.
@@ -216,13 +216,25 @@ func (s *Store) Ack(ctx context.Context, name string, seq int64) error {
 }
 
 // ClearGap clears subscription name's gap when version is still current: the
-// subscriber confirmed it resynced. A gap a later run widened stays. It
-// reports whether that gap was cleared.
-func (s *Store) ClearGap(ctx context.Context, name string, version int64) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE subscriptions SET gap_from = NULL, gap_to = NULL
-		WHERE name = $1 AND gap_ver = $2 AND gap_from IS NOT NULL`, name, version)
-	return tag.RowsAffected() == 1, err
+// subscriber confirmed it resynced. current is false when a later run widened
+// it (version is no longer the stored one); confirming twice is current.
+func (s *Store) ClearGap(ctx context.Context, name string, version int64) (current bool, err error) {
+	err = s.db.QueryRow(ctx, `
+		UPDATE subscriptions SET
+			gap_from = CASE WHEN gap_ver = $2 THEN NULL ELSE gap_from END,
+			gap_to   = CASE WHEN gap_ver = $2 THEN NULL ELSE gap_to END
+		WHERE name = $1 RETURNING gap_ver = $2`, name, version).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return current, err
+}
+
+// GapVersion is subscription name's current gap version.
+func (s *Store) GapVersion(ctx context.Context, name string) (int64, error) {
+	var v int64
+	err := s.db.QueryRow(ctx, `SELECT gap_ver FROM subscriptions WHERE name = $1`, name).Scan(&v)
+	return v, err
 }
 
 // Fail counts one more failure of the head event and returns the total.
