@@ -70,7 +70,7 @@ func TestPrune(t *testing.T) {
 	if err := s.DeadLetter(ctx, "parked", event.Event{Seq: 4, Subject: "a/poison"}, "boom"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Ack(ctx, "ahead", 5); err != nil {
+	if err := s.Ack(ctx, "ahead", 5, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Insert(ctx, evOn("old5", "dev.a.x", "a/poison")); err != nil { // id 6, parked behind old3
@@ -135,13 +135,20 @@ func TestPrune(t *testing.T) {
 	if _, gap, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil); err != nil || gap == nil || gap.From != 2 || gap.To != 6 {
 		t.Fatalf("subscribe gap %+v %v", gap, err)
 	}
-	if err := s.Ack(ctx, "lagging", 3); err != nil {
+	if err := s.Ack(ctx, "lagging", 3, 6); err != nil {
 		t.Fatal(err)
 	}
 	if c, from, _ := cursorGap(t, s, "lagging"); c != 3 || from == nil {
 		t.Fatalf("ack inside the gap: cursor %d gap %v", c, from)
 	}
-	if err := s.Ack(ctx, "lagging", 7); err != nil {
+	// An Ack past the gap from a stream that never sent it leaves it in place.
+	if err := s.Ack(ctx, "lagging", 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, from, _ := cursorGap(t, s, "lagging"); from == nil {
+		t.Fatal("a gap was cleared by a stream that never sent it")
+	}
+	if err := s.Ack(ctx, "lagging", 7, 6); err != nil {
 		t.Fatal(err)
 	}
 	if c, from, _ := cursorGap(t, s, "lagging"); c != 7 || from != nil {
@@ -194,7 +201,10 @@ func TestStaleDeadLetters(t *testing.T) {
 	ctx := context.Background()
 	s.Subscribe(ctx, "d", []string{"dev."}, nil)
 	for i, subj := range []string{"x/1", "x/1", "x/2"} {
-		s.DeadLetter(ctx, "d", event.Event{Seq: int64(i + 1), Subject: subj}, "boom")
+		s.Insert(ctx, evOn(fmt.Sprint("d", i), "dev.x", subj))
+		if err := s.DeadLetter(ctx, "d", event.Event{Seq: int64(i + 1), Subject: subj}, "boom"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s.db.Exec(ctx, `UPDATE dead_letters SET at = now() - interval '4 days' WHERE subject = 'x/1'`)
 	got, err := s.StaleDeadLetters(ctx, 72*time.Hour)
@@ -203,5 +213,29 @@ func TestStaleDeadLetters(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Subject != "x/1" || got[0].Count != 2 {
 		t.Fatalf("stale %+v, want one line for x/1 with 2", got)
+	}
+}
+
+// A Nack that dead-letters an event retention already deleted parks nothing.
+func TestDeadLetterAfterPrune(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	s.Subscribe(ctx, "n", []string{"dev."}, nil)
+	s.Insert(ctx, evOn("gone", "dev.x", "x/1"))
+	age(t, s, 1)
+	if _, err := s.Prune(ctx, time.Now().Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeadLetter(ctx, "n", event.Event{Seq: 1, Subject: "x/1"}, "late"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	s.db.QueryRow(ctx, `SELECT count(*) FROM dead_letters`).Scan(&n)
+	if n != 0 {
+		t.Fatal("a dead letter was recorded for a deleted event, parking its subject")
+	}
+	// A new subscription starts at or past the watermark, never below it.
+	if c, _, err := s.Subscribe(ctx, "late", []string{"dev."}, nil); err != nil || c < 1 {
+		t.Fatalf("new subscription cursor %d %v", c, err)
 	}
 }

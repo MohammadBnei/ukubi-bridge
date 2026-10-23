@@ -82,15 +82,22 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
   has to receive a kept event (its subject is parked for someone else) keeps
   its cursor just before it.
 - Every other subscription behind the deleted range moves its cursor past it,
-  so a quiet subscription never falls behind. Its live stream ends `Aborted`:
-  reconnect.
+  so a quiet subscription never falls behind.
 - A subscription that loses a matching event it never acked records a **gap**
   (widened by later runs, never replaced). Its next `Subscribe` sends one
   message carrying `gap {from_seq, to_seq}` before any event: resync from your
-  own source of truth, and never Ack it. The gap stays until an Ack past
-  `to_seq`; an Ack never moves a cursor back.
+  own source of truth, and never Ack it. Its live stream ends `Aborted`, so it
+  reconnects to that gap. The gap stays until an Ack past `to_seq` on a stream
+  that sent it; an Ack never moves a cursor back.
+- A dead letter is never recorded for an event already deleted.
 - Each subject left parked for 3 days is logged once per run (`dead letter
-  uncleared`), which the chart's Loki rule alerts on.
+  uncleared`), and a failed run logs `retention failed`: the chart's Loki rules
+  alert on both.
+
+The run locks `dead_letters` for its duration, so an unparking `UPDATE` or a
+live dead-lettering waits for it. Clients written before gaps existed must
+handle a message whose `event` is unset (there are none yet: nothing calls the
+API before agent-fleet's dispatcher).
 
 Dedup on `(source, id)` holds only within retention: an id published again
 after its event was deleted is a new event.
@@ -102,16 +109,17 @@ and the per-thread agent-wake cap bounds loops.
 
 ### Unparking a subject
 
-Nothing exposes this yet. Fix the subscriber, then:
+Nothing exposes this yet. Fix the subscriber, replay the parked events (below), then:
 
 ```sql
 UPDATE dead_letters SET cleared_at = now()
 WHERE subscription = 'core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;
 ```
 
-The dead-lettered events stay behind the cursor; `Replay` from the first one's
-`event_id` re-sends them. Retention keeps them while their dead letter is
-uncleared, and deletes them on its next run once it is.
+The dead-lettered events stay behind the cursor. Retention keeps them only
+while their dead letter is uncleared, so **Replay first, then clear**: `Replay`
+from the first one's `event_id`, let the subscriber handle them, then run the
+`UPDATE` above. Once cleared, the next run deletes them.
 
 ## Configuration
 

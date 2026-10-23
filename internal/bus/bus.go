@@ -188,6 +188,7 @@ type Server struct {
 type stream struct {
 	cancel   context.CancelCauseFunc
 	inflight event.Event
+	sentGap  int64        // the to_seq of the gap this stream sent, 0 if none
 	done     chan outcome // buffered 1: written once per claimed delivery
 }
 
@@ -264,10 +265,10 @@ func ended(ctx context.Context) error {
 	switch cause := context.Cause(ctx); {
 	case errors.Is(cause, errExpired):
 		return connect.NewError(connect.CodeUnauthenticated, errExpired)
-	case errors.Is(cause, errMoved), errors.Is(cause, errReplaced):
+	case errors.Is(cause, errMoved):
 		return connect.NewError(connect.CodeAborted, cause)
 	}
-	return nil
+	return nil // the client went away, or a newer stream took over (it must not reconnect)
 }
 
 // unavailable is a store error on a bounded stream: Unauthenticated when the
@@ -351,21 +352,10 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 	defer cancel()
-	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
-	if err != nil {
-		return unavailable(ctx, err)
-	}
-	// Send headers now: the client's call returns once the subscription is
-	// registered, so a Publish made after it is never missed.
-	if err := out.Send(nil); err != nil {
-		return err
-	}
-	if gap != nil {
-		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To}}); err != nil {
-			return err
-		}
-	}
 
+	// Registered before the cursor is read: a deletion run that commits from
+	// here on finds this stream and ends it, so it never runs on a cursor and
+	// gap read before that run.
 	ctx, stop := context.WithCancelCause(ctx)
 	me := &stream{cancel: stop, done: make(chan outcome, 1)}
 	s.mu.Lock()
@@ -382,6 +372,24 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		s.mu.Unlock()
 		stop(nil)
 	}()
+
+	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+	if err != nil {
+		return unavailable(ctx, err)
+	}
+	// Send headers now: the client's call returns once the subscription is
+	// registered, so a Publish made after it is never missed.
+	if err := out.Send(nil); err != nil {
+		return err
+	}
+	if gap != nil {
+		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To}}); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		me.sentGap = gap.To // only an Ack on this stream, past this, clears it
+		s.mu.Unlock()
+	}
 
 	for {
 		wake := s.st.Wake()
@@ -431,8 +439,8 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	}
 }
 
-// Drop ends the live streams of subscriptions whose cursor moved under them
-// (a deletion run): they reconnect, reload the cursor and get any gap first.
+// Drop ends the live streams of subscriptions a deletion run gapped: they
+// reconnect, reload the cursor and get the gap first.
 func (s *Server) Drop(names []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -444,11 +452,13 @@ func (s *Server) Drop(names []string) {
 }
 
 // Prune runs one deletion of what was ingested before cutoff, then ends the
-// streams it moved.
+// streams that lost events, so they reconnect to their gap. A stream that was
+// only moved keeps going: its in-memory cursor is merely behind, Match skips
+// the deleted rows and Ack never moves the stored cursor back.
 func (s *Server) Prune(ctx context.Context, cutoff time.Time) (store.Pruned, error) {
 	p, err := s.st.Prune(ctx, cutoff)
 	if err == nil {
-		s.Drop(p.Moved)
+		s.Drop(p.Gapped)
 	}
 	return p, err
 }
@@ -476,7 +486,10 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	if err != nil {
 		return nil, err
 	}
-	if err := s.st.Ack(ctx, sub, seq); err != nil {
+	s.mu.Lock()
+	sentGap := st.sentGap
+	s.mu.Unlock()
+	if err := s.st.Ack(ctx, sub, seq, sentGap); err != nil {
 		st.done <- outcome{} // redeliver; subscribers are idempotent on (source, id)
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
@@ -558,10 +571,23 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 			return err
 		}
 	}
+	// A deletion run can commit mid-replay: each page re-reads the watermark
+	// and announces what it removed ahead of the replay.
+	gapped := through
 	for after := max(req.Msg.GetFromSeq()-1, 0); after < head; {
 		ds, err := s.st.Match(ctx, sub, after, 100)
 		if err != nil {
 			return unavailable(ctx, err)
+		}
+		now, err := s.st.DeletedThrough(ctx)
+		if err != nil {
+			return unavailable(ctx, err)
+		}
+		if now > gapped && now > after {
+			if err := out.Send(&bridgev1.ReplayResponse{Gap: &bridgev1.Gap{FromSeq: max(after+1, gapped+1), ToSeq: now}}); err != nil {
+				return err
+			}
+			gapped = now
 		}
 		if len(ds) == 0 {
 			return nil

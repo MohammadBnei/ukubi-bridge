@@ -74,3 +74,6 @@ LANGUAGE sql IMMUTABLE AS $$
        AND (cardinality(subjects) = 0 OR EXISTS (SELECT 1 FROM unnest(subjects) g WHERE s LIKE
             replace(replace(replace(replace(replace(g, '\', '\\'), '%', '\%'), '_', '\_'), '*', '%'), '?', '_')))
 $$;
+
+-- Retention looks dead letters up by subject for every event it considers.
+CREATE INDEX IF NOT EXISTS dead_letters_subject ON dead_letters (subject, event_id) WHERE cleared_at IS NULL;

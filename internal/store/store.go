@@ -151,7 +151,7 @@ func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []st
 	var from, to *int64
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO subscriptions (name, types, subjects, last_acked_id)
-		VALUES ($1, $2, $3, (SELECT coalesce(max(id), 0) FROM events))
+		VALUES ($1, $2, $3, GREATEST((SELECT coalesce(max(id), 0) FROM events), (SELECT deleted_through FROM retention)))
 		ON CONFLICT (name) DO UPDATE
 		SET types = excluded.types, subjects = excluded.subjects, last_seen = now()
 		RETURNING last_acked_id, gap_from, gap_to`, name, nonNil(types), nonNil(subjects)).Scan(&cursor, &from, &to)
@@ -207,14 +207,17 @@ func (s *Store) Head(ctx context.Context) (int64, error) {
 }
 
 // Ack moves the cursor to seq (never back: a deletion run may have moved it
-// past) and resets the retry count. An Ack past a gap clears it: the gap
-// message precedes that event on the stream, so the subscriber has seen it.
-func (s *Store) Ack(ctx context.Context, name string, seq int64) error {
+// past) and resets the retry count.
+//
+// sentGap is the to_seq of the gap the acking stream sent (0: none). The gap
+// clears only when that stream sent all of it and seq is past it, so a gap
+// recorded or widened after the stream started is never cleared unseen.
+func (s *Store) Ack(ctx context.Context, name string, seq, sentGap int64) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE subscriptions SET last_acked_id = GREATEST(last_acked_id, $2), attempts = 0, last_seen = now(),
-			gap_from = CASE WHEN $2 > gap_to THEN NULL ELSE gap_from END,
-			gap_to   = CASE WHEN $2 > gap_to THEN NULL ELSE gap_to END
-		WHERE name = $1`, name, seq)
+			gap_from = CASE WHEN $3 > 0 AND gap_to <= $3 AND $2 > gap_to THEN NULL ELSE gap_from END,
+			gap_to   = CASE WHEN $3 > 0 AND gap_to <= $3 AND $2 > gap_to THEN NULL ELSE gap_to END
+		WHERE name = $1`, name, seq, sentGap)
 	return err
 }
 
@@ -235,8 +238,12 @@ func (s *Store) DeadLetter(ctx context.Context, name string, e event.Event, reas
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Only while the event still exists: a deletion run that removed it first
+	// already counted it in this subscription's gap, and a dead letter for a
+	// deleted event would park its subject for nothing.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO dead_letters (subscription, event_id, subject, reason) VALUES ($1, $2, $3, $4)
+		INSERT INTO dead_letters (subscription, event_id, subject, reason)
+		SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM events WHERE id = $2)
 		ON CONFLICT DO NOTHING`, name, e.Seq, e.Subject, reason); err != nil {
 		return err
 	}
@@ -282,9 +289,14 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (Pruned, error) {
 		return p, err
 	}
 	defer tx.Rollback(ctx)
-	// Lock order: retention, then every subscription by name. A live
-	// DeadLetter or Ack touches one subscription row, so it waits instead of
-	// deadlocking, and an operator's clear cannot interleave mid-run.
+	// Lock order: dead_letters, retention, then every subscription by name
+	// (DeadLetter takes dead_letters then its subscription; Ack only its
+	// subscription), so nothing deadlocks. The table lock makes every
+	// statement below see the same dead letters: an operator's clear or a
+	// live DeadLetter waits for the run instead of landing between its steps.
+	if _, err := tx.Exec(ctx, `LOCK TABLE dead_letters IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return p, err
+	}
 	var done int64 // the watermark only grows
 	if err := tx.QueryRow(ctx, `SELECT deleted_through FROM retention FOR UPDATE`).Scan(&done); err != nil {
 		return p, err
