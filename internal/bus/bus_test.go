@@ -93,7 +93,7 @@ func setup(t *testing.T) fixture {
 	t.Cleanup(srv.Close)
 
 	// PollEvery an hour: deliveries in these tests must come from the NOTIFY nudge.
-	MaxAttempts, RetryBase, PollEvery, MinStreamLife, GapHold = 5, time.Millisecond, time.Hour, 100*time.Millisecond, 200*time.Millisecond
+	MaxAttempts, RetryBase, PollEvery, MinStreamLife = 5, time.Millisecond, time.Hour, 100*time.Millisecond
 	return fixture{db: db, api: bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL), srv: bus}
 }
 
@@ -456,8 +456,8 @@ func TestStreamEndsAtExpiry(t *testing.T) {
 }
 
 // Retention seen from a subscriber: a gapped stream ends Aborted, the next
-// Subscribe sends the gap first (until a stream held it GapHold), and Replay
-// from below the watermark too.
+// Subscribe sends the gap first until the subscriber confirms it, and Replay
+// from below the watermark starts with one too.
 func TestRetentionGap(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
@@ -503,11 +503,26 @@ func TestRetentionGap(t *testing.T) {
 	if g := again.Msg().Gap; g == nil || g.FromSeq != first.Seq || g.ToSeq != p.Through || again.Msg().Event != nil {
 		t.Fatalf("first message %+v, want the gap %d..%d", again.Msg(), first.Seq, p.Through)
 	}
-	time.Sleep(3 * GapHold)
+	g := again.Msg().Gap
+	confirm := func(v int64) error {
+		_, err := f.api.Ack(ctx, as("core-token", &bridgev1.AckRequest{Subscription: "bridge-core/ret", GapVersion: v}))
+		return err
+	}
+	if err := confirm(g.Version + 1); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("confirming a version never sent: %v, want FailedPrecondition", err)
+	}
+	if err := confirm(g.Version); err != nil {
+		t.Fatalf("confirming the gap: %v", err)
+	}
 	var gapTo *int64
-	f.db.QueryRow(ctx, `SELECT gap_to FROM subscriptions WHERE name = 'bridge-core/ret'`).Scan(&gapTo)
+	if err := f.db.QueryRow(ctx, `SELECT gap_to FROM subscriptions WHERE name = 'bridge-core/ret'`).Scan(&gapTo); err != nil {
+		t.Fatal(err)
+	}
 	if gapTo != nil {
-		t.Fatal("a gap delivered on a stream that held was not cleared")
+		t.Fatal("a confirmed gap was not cleared")
+	}
+	if err := confirm(g.Version); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("confirming twice: %v, want FailedPrecondition", err)
 	}
 
 	rs, err := f.api.Replay(ctx, as("core-token", &bridgev1.ReplayRequest{Subscription: "bridge-core/ret", FromSeq: 1}))

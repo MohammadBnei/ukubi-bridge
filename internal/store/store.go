@@ -141,24 +141,24 @@ func Invalid(err error) bool {
 
 // Gap is a range of log positions deleted before a subscription acked the
 // matching events in it (infra-bootstrap ADR-0066 §6).
-type Gap struct{ From, To int64 }
+type Gap struct{ From, To, Version int64 }
 
 // Subscribe creates or refilters subscription name and returns its cursor and
-// any gap it has not yet acked past. A new subscription starts at the head of
+// any gap it has not confirmed. A new subscription starts at the head of
 // the log: history is Replay's job.
 func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []string) (int64, *Gap, error) {
-	var cursor int64
+	var cursor, ver int64
 	var from, to *int64
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO subscriptions (name, types, subjects, last_acked_id)
 		VALUES ($1, $2, $3, GREATEST((SELECT coalesce(max(id), 0) FROM events), (SELECT deleted_through FROM retention)))
 		ON CONFLICT (name) DO UPDATE
 		SET types = excluded.types, subjects = excluded.subjects, last_seen = now()
-		RETURNING last_acked_id, gap_from, gap_to`, name, nonNil(types), nonNil(subjects)).Scan(&cursor, &from, &to)
+		RETURNING last_acked_id, gap_from, gap_to, gap_ver`, name, nonNil(types), nonNil(subjects)).Scan(&cursor, &from, &to, &ver)
 	if err != nil || from == nil || to == nil {
 		return cursor, nil, err
 	}
-	return cursor, &Gap{*from, *to}, nil
+	return cursor, &Gap{*from, *to, ver}, nil
 }
 
 // Filter returns subscription name's stored filter; found is false when it does not exist.
@@ -215,12 +215,14 @@ func (s *Store) Ack(ctx context.Context, name string, seq int64) error {
 	return err
 }
 
-// ClearGap clears subscription name's gap once a stream delivered it, unless
-// a later run widened it past what that stream sent (to).
-func (s *Store) ClearGap(ctx context.Context, name string, to int64) error {
-	_, err := s.db.Exec(ctx, `
-		UPDATE subscriptions SET gap_from = NULL, gap_to = NULL WHERE name = $1 AND gap_to <= $2`, name, to)
-	return err
+// ClearGap clears subscription name's gap when version is still current: the
+// subscriber confirmed it resynced. A gap a later run widened stays. It
+// reports whether that gap was cleared.
+func (s *Store) ClearGap(ctx context.Context, name string, version int64) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE subscriptions SET gap_from = NULL, gap_to = NULL
+		WHERE name = $1 AND gap_ver = $2 AND gap_from IS NOT NULL`, name, version)
+	return tag.RowsAffected() == 1, err
 }
 
 // Fail counts one more failure of the head event and returns the total.
@@ -346,7 +348,8 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (Pruned, error) {
 			FROM subscriptions s WHERE s.last_acked_id < $1)
 		UPDATE subscriptions s SET last_acked_id = b.next, attempts = 0,
 			gap_from = CASE WHEN b.lost THEN LEAST(coalesce(s.gap_from, b.cursor + 1), b.cursor + 1) ELSE s.gap_from END,
-			gap_to   = CASE WHEN b.lost THEN GREATEST(coalesce(s.gap_to, $1), $1) ELSE s.gap_to END
+			gap_to   = CASE WHEN b.lost THEN GREATEST(coalesce(s.gap_to, $1), $1) ELSE s.gap_to END,
+			gap_ver  = CASE WHEN b.lost THEN s.gap_ver + 1 ELSE s.gap_ver END
 		FROM behind b WHERE s.name = b.name AND (b.next > b.cursor OR b.lost)
 		RETURNING s.name, b.lost`, p.Through)
 	if err != nil {

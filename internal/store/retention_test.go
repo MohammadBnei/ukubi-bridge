@@ -130,9 +130,10 @@ func TestPrune(t *testing.T) {
 		t.Fatalf("deleted_through %d", x)
 	}
 
-	// Subscribe reports the gap; an Ack never moves the cursor back; a stream
-	// that sent a narrower gap cannot clear a widened one; one that sent it can.
-	if _, gap, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil); err != nil || gap == nil || gap.From != 2 || gap.To != 6 {
+	// Subscribe reports the gap with its version; an Ack never moves the
+	// cursor back; only the current version's confirmation clears it.
+	_, gap, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil)
+	if err != nil || gap == nil || gap.From != 2 || gap.To != 6 || gap.Version != 1 {
 		t.Fatalf("subscribe gap %+v %v", gap, err)
 	}
 	if err := s.Ack(ctx, "lagging", 2); err != nil {
@@ -141,17 +142,14 @@ func TestPrune(t *testing.T) {
 	if c, _, _ := cursorGap(t, s, "lagging"); c != 3 {
 		t.Fatalf("an Ack moved the cursor back to %d", c)
 	}
-	if err := s.ClearGap(ctx, "lagging", 5); err != nil {
-		t.Fatal(err)
+	if ok, err := s.ClearGap(ctx, "lagging", 0); err != nil || ok {
+		t.Fatalf("a stale version cleared the gap: %v %v", ok, err)
 	}
-	if _, from, _ := cursorGap(t, s, "lagging"); from == nil {
-		t.Fatal("a narrower sent gap cleared a wider one")
-	}
-	if err := s.ClearGap(ctx, "lagging", 6); err != nil {
-		t.Fatal(err)
+	if ok, err := s.ClearGap(ctx, "lagging", gap.Version); err != nil || !ok {
+		t.Fatalf("the confirmed gap was not cleared: %v %v", ok, err)
 	}
 	if _, from, _ := cursorGap(t, s, "lagging"); from != nil {
-		t.Fatal("the delivered gap was not cleared")
+		t.Fatal("gap still stored")
 	}
 
 	// Once the operator clears the dead letters, the kept events go on the
@@ -194,6 +192,10 @@ func TestPruneWidensGap(t *testing.T) {
 	}
 	if _, from, to := cursorGap(t, s, "w"); from == nil || *from != 1 || *to != 4 {
 		t.Fatalf("gap %v..%v, want 1..4", from, to)
+	}
+	// Confirming the first run's version no longer clears the widened gap.
+	if ok, _ := s.ClearGap(ctx, "w", 1); ok {
+		t.Fatal("a confirmation of the narrower gap cleared the widened one")
 	}
 }
 

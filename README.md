@@ -85,16 +85,18 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
   so a quiet subscription never falls behind.
 - A subscription that loses a matching event it never acked records a **gap**
   (widened by later runs, never replaced). Its next `Subscribe` sends one
-  message carrying `gap {from_seq, to_seq}` before any event: resync from your
-  own source of truth, and never Ack it. Its live stream ends `Aborted`, so it
-  reconnects to that gap. The gap is sent again on every reconnect until a
-  stream that sent it has stayed up 30 s; an Ack never moves a cursor back. A
-  stream replaced by a newer `Subscribe` on the same name ends cleanly: do not
-  reconnect on that.
+  message carrying `gap {from_seq, to_seq, version}` before any event: resync
+  from your own source of truth, then confirm it with `Ack{subscription,
+  gap_version: version}` (seq 0). Its live stream ends `Aborted`, so it
+  reconnects to that gap. The gap is sent on every reconnect until confirmed;
+  a run that widens it bumps `version`, so confirming an older one is
+  `FailedPrecondition` (reconnect for the current one). An Ack never moves a
+  cursor back. A stream replaced by a newer `Subscribe` on the same name ends
+  cleanly: do not reconnect on that.
 - A dead letter is never recorded for an event already deleted.
 - Each subject left parked for 3 days is logged once per run (`dead letter
-  uncleared`), and a failed run logs `retention failed`: the chart's Loki rules
-  alert on both.
+  uncleared`), and a failed run logs one `retention failed` line: the chart's
+  Loki rules alert on both.
 
 The run locks `dead_letters` for its duration, so an unparking `UPDATE` or a
 live dead-lettering waits for it. Clients written before gaps existed must
@@ -118,7 +120,9 @@ unparked, so work in rounds. Fix the subscriber, then:
 1. Note the subject's uncleared dead letters:
    `SELECT min(event_id), max(event_id) FROM dead_letters WHERE subscription = 'bridge-core' AND subject = 'github/MohammadBnei/editable-blog/pr/42' AND cleared_at IS NULL;`
 2. `Replay` from that `min`, and let the subscriber handle the events up to
-   that `max` (idempotent on `(source, id)`).
+   that `max` (idempotent on `(source, id)`). If the parked events are older
+   than the watermark, Replay's first message is a `gap`: here it only says
+   other events in that range may be gone; the parked ones follow.
 3. Clear only what was replayed:
 
    ```sql

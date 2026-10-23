@@ -180,9 +180,8 @@ type Server struct {
 	clients map[string]Client
 	tokens  Verifier
 
-	mu    sync.Mutex
-	live  map[string]*stream // subscription name -> its one active Subscribe
-	drops map[string]uint64  // subscription name -> deletion runs that gapped it
+	mu   sync.Mutex
+	live map[string]*stream // subscription name -> its one active Subscribe
 }
 
 // stream is one Subscribe call. inflight is the event awaiting Ack/Nack, Seq 0 if none.
@@ -198,7 +197,7 @@ type outcome struct {
 }
 
 func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
-	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}, drops: map[string]uint64{}}
+	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}}
 }
 
 // Handler mounts the service on a mux.
@@ -210,9 +209,6 @@ var (
 	errGapped   = errors.New("retention deleted events this subscription had not acked: reconnect to get the gap, then resync")
 	errReplaced = errors.New("replaced by a newer stream on this subscription")
 )
-
-// GapHold: a gap clears once the stream that sent it has stayed up this long.
-var GapHold = 30 * time.Second
 
 // errExpired ends a stream at its token's exp, so the client reconnects with
 // a fresh one (ADR-0066 §1: deactivating an account takes effect within one
@@ -356,12 +352,10 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	}
 	defer cancel()
 
-	// A deletion run that gaps this subscription between reading the cursor
-	// and registering below bumps drops[name]: then this stream would start
-	// on a cursor and gap read before that run, so it ends instead.
-	s.mu.Lock()
-	gen := s.drops[name]
-	s.mu.Unlock()
+	// A deletion run that gaps this subscription between this read and the
+	// registration below misses this stream: it then runs on the older cursor
+	// (Match skips deleted rows) and the new gap waits in the store, confirmed
+	// by no one, until the next reconnect sends it, at most one token later.
 	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
 		return unavailable(ctx, err)
@@ -370,11 +364,6 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	ctx, stop := context.WithCancelCause(ctx)
 	me := &stream{cancel: stop, done: make(chan outcome, 1)}
 	s.mu.Lock()
-	if s.drops[name] != gen {
-		s.mu.Unlock()
-		stop(nil)
-		return connect.NewError(connect.CodeAborted, errGapped)
-	}
 	if old := s.live[name]; old != nil {
 		old.cancel(errReplaced) // a reconnect replaces a stream that may be half-dead
 	}
@@ -395,20 +384,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 	if gap != nil {
-		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To}}); err != nil {
+		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To, Version: gap.Version}}); err != nil {
 			return err
 		}
-		// It is the stream's first message: a stream still up GapHold later
-		// has delivered it. Until then a reconnect sends it again.
-		go func(to int64) {
-			select {
-			case <-ctx.Done():
-			case <-time.After(GapHold):
-				cctx, done := context.WithTimeout(context.Background(), 5*time.Second)
-				defer done()
-				_ = s.st.ClearGap(cctx, name, to) // failing leaves it to be resent: harmless
-			}
-		}(gap.To)
 	}
 
 	for {
@@ -465,7 +443,6 @@ func (s *Server) Drop(names []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, n := range names {
-		s.drops[n]++
 		if st := s.live[n]; st != nil {
 			st.cancel(errGapped)
 		}
@@ -502,6 +479,17 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	sub, seq := req.Msg.GetSubscription(), req.Msg.GetSeq()
 	if _, _, err := s.owns(req.Header(), sub); err != nil {
 		return nil, err
+	}
+	if v := req.Msg.GetGapVersion(); seq == 0 && v > 0 {
+		cleared, err := s.st.ClearGap(ctx, sub, v)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeUnavailable, err)
+		}
+		if !cleared {
+			// Widened since it was sent (or already confirmed): reconnect for the current one.
+			return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d of %q is not current", v, sub))
+		}
+		return connect.NewResponse(&bridgev1.AckResponse{}), nil
 	}
 	st, _, err := s.claim(sub, seq)
 	if err != nil {

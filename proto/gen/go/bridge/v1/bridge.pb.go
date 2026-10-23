@@ -338,8 +338,8 @@ type SubscribeResponse struct {
 	// Unset on the message that carries a gap.
 	Event *CloudEvent `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
 	// Sent first when retention deleted matching events this subscription
-	// never acked: resync from your own source of truth. Sent again on every
-	// reconnect until a stream that sent it stayed up 30 s. Never Ack it.
+	// never acked: resync from your own source of truth, then confirm it with
+	// Ack{gap_version}. Sent again on every reconnect until confirmed.
 	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -392,9 +392,13 @@ func (x *SubscribeResponse) GetGap() *Gap {
 // Gap is a range of log positions deleted before they were acked
 // (infra-bootstrap ADR-0066 §6). Events in it may be lost.
 type Gap struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FromSeq       int64                  `protobuf:"varint,1,opt,name=from_seq,json=fromSeq,proto3" json:"from_seq,omitempty"`
-	ToSeq         int64                  `protobuf:"varint,2,opt,name=to_seq,json=toSeq,proto3" json:"to_seq,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	FromSeq int64                  `protobuf:"varint,1,opt,name=from_seq,json=fromSeq,proto3" json:"from_seq,omitempty"`
+	ToSeq   int64                  `protobuf:"varint,2,opt,name=to_seq,json=toSeq,proto3" json:"to_seq,omitempty"`
+	// On Subscribe: what Ack{gap_version} confirms. A deletion run that widens
+	// the gap bumps it, so a confirmation of an older gap does nothing. Unset
+	// on Replay, whose gap needs no confirmation.
+	Version       int64 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -443,10 +447,20 @@ func (x *Gap) GetToSeq() int64 {
 	return 0
 }
 
+func (x *Gap) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
 type AckRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Subscription  string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
-	Seq           int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Subscription string                 `protobuf:"bytes,1,opt,name=subscription,proto3" json:"subscription,omitempty"`
+	Seq          int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// With seq 0: confirms the subscription's gap of this version, once
+	// resynced. Nothing else is acked.
+	GapVersion    int64 `protobuf:"varint,3,opt,name=gap_version,json=gapVersion,proto3" json:"gap_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -491,6 +505,13 @@ func (x *AckRequest) GetSubscription() string {
 func (x *AckRequest) GetSeq() int64 {
 	if x != nil {
 		return x.Seq
+	}
+	return 0
+}
+
+func (x *AckRequest) GetGapVersion() int64 {
+	if x != nil {
+		return x.GapVersion
 	}
 	return 0
 }
@@ -683,8 +704,9 @@ type ReplayResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Unset on the message that carries a gap.
 	Event *CloudEvent `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
-	// Sent first when from_seq is at or below the retention watermark: what
-	// follows is what is kept (parked events included), not everything.
+	// Sent first when from_seq is at or below the retention watermark: events
+	// in it may have been deleted; what follows is what is kept (parked events
+	// included).
 	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -767,14 +789,17 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\bsubjects\x18\x03 \x03(\tR\bsubjects\"b\n" +
 	"\x11SubscribeResponse\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\x12 \n" +
-	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\"7\n" +
+	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\"Q\n" +
 	"\x03Gap\x12\x19\n" +
 	"\bfrom_seq\x18\x01 \x01(\x03R\afromSeq\x12\x15\n" +
-	"\x06to_seq\x18\x02 \x01(\x03R\x05toSeq\"B\n" +
+	"\x06to_seq\x18\x02 \x01(\x03R\x05toSeq\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\"c\n" +
 	"\n" +
 	"AckRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x03R\x03seq\"\r\n" +
+	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x1f\n" +
+	"\vgap_version\x18\x03 \x01(\x03R\n" +
+	"gapVersion\"\r\n" +
 	"\vAckResponse\"[\n" +
 	"\vNackRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x10\n" +

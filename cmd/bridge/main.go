@@ -177,18 +177,18 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 // retain deletes events older than keep every interval (infra-bootstrap
 // ADR-0066 §6), then logs each parked subject left uncleared for 3 days: one
 // line per subscription and subject, which the chart's LogQL rule alerts on.
-// A failed run logs "retention failed", which has its own rule.
+// A run that fails either step logs one "retention failed" line, which has its
+// own rule.
 func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every time.Duration) {
 	for {
-		if p, err := api.Prune(ctx, time.Now().Add(-keep)); err != nil {
-			slog.Error("retention failed", "err", err)
-		} else if p.Through > 0 {
+		p, perr := api.Prune(ctx, time.Now().Add(-keep))
+		if perr == nil && p.Through > 0 {
 			slog.Info("retention", "through", p.Through, "deleted", p.Deleted, "moved", len(p.Moved), "gapped", p.Gapped)
 		}
 		// Whatever the run did: a failing run must not silence this alert.
-		stale, err := st.StaleDeadLetters(ctx, 72*time.Hour)
-		if err != nil {
-			slog.Error("dead letter check failed", "err", err)
+		stale, serr := st.StaleDeadLetters(ctx, 72*time.Hour)
+		if err := errors.Join(perr, serr); err != nil && ctx.Err() == nil {
+			slog.Error("retention failed", "err", err) // one line per run: the failing rule counts runs
 		}
 		for _, d := range stale {
 			slog.Warn("dead letter uncleared", "subscription", d.Subscription, "subject", d.Subject, "count", d.Count, "since", d.Since)

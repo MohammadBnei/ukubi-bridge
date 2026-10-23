@@ -73,8 +73,8 @@ message SubscribeResponse {
   // Unset on the message that carries a gap.
   CloudEvent event = 1;
   // Sent first when retention deleted matching events this subscription
-  // never acked: resync from your own source of truth. Sent again on every
-  // reconnect until a stream that sent it stayed up 30 s. Never Ack it.
+  // never acked: resync from your own source of truth, then confirm it with
+  // Ack{gap_version}. Sent again on every reconnect until confirmed.
   Gap gap = 2;
 }
 
@@ -83,11 +83,18 @@ message SubscribeResponse {
 message Gap {
   int64 from_seq = 1;
   int64 to_seq = 2;
+  // On Subscribe: what Ack{gap_version} confirms. A deletion run that widens
+  // the gap bumps it, so a confirmation of an older gap does nothing. Unset
+  // on Replay, whose gap needs no confirmation.
+  int64 version = 3;
 }
 
 message AckRequest {
   string subscription = 1;
   int64 seq = 2;
+  // With seq 0: confirms the subscription's gap of this version, once
+  // resynced. Nothing else is acked.
+  int64 gap_version = 3;
 }
 
 message AckResponse {}
@@ -108,7 +115,8 @@ message ReplayRequest {
 message ReplayResponse {
   // Unset on the message that carries a gap.
   CloudEvent event = 1;
-  // Sent first when from_seq is at or below the retention watermark: what
-  // follows is what is kept (parked events included), not everything.
+  // Sent first when from_seq is at or below the retention watermark: events
+  // in it may have been deleted; what follows is what is kept (parked events
+  // included).
   Gap gap = 2;
 }

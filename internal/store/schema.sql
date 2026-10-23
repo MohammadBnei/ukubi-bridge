@@ -48,9 +48,12 @@ CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
 
 -- Retention (infra-bootstrap ADR-0066 §6). A deletion run records a gap on a
 -- subscription that lost matching events it never acked; Subscribe sends it
--- first, and an Ack past gap_to clears it.
+-- first, and the subscriber's confirmation (Ack with gap_version) clears it.
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_from bigint;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_to   bigint;
+-- Bumped whenever a run records or widens the gap: only a confirmation of the
+-- current version clears it.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS gap_ver  bigint NOT NULL DEFAULT 0;
 
 -- One row: the log position deleted through. Replay from at or below it
 -- starts with a gap.
