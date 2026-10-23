@@ -61,7 +61,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
-	mux.Handle(bus.New(st, clients, tokens).Handler())
+	api := bus.New(st, clients, tokens)
+	mux.Handle(api.Handler())
 
 	// Unset token: both answer 503 rather than serve open.
 	alertToken := os.Getenv("BRIDGE_ALERT_TOKEN")
@@ -71,6 +72,15 @@ func main() {
 	if u := os.Getenv("BRIDGE_OIDC_JWKS_URL"); u != "" {
 		go tokens.Watch(ctx, u, &http.Client{Timeout: 10 * time.Second}, time.Hour)
 	}
+	keep := 30 * 24 * time.Hour
+	if v := os.Getenv("BRIDGE_RETENTION"); v != "" {
+		if keep, err = time.ParseDuration(v); err != nil || keep < 24*time.Hour {
+			slog.Error("BRIDGE_RETENTION must be a Go duration of at least 24h", "value", v)
+			os.Exit(1)
+		}
+	}
+	go retain(ctx, api, st, keep, time.Hour)
+
 	if r := reconciler(st); r != nil {
 		go r.Loop(ctx, 10*time.Minute)
 	}
@@ -162,6 +172,34 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "trusted", e.Trusted, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
+}
+
+// retain deletes events older than keep every interval (infra-bootstrap
+// ADR-0066 §6), then logs each parked subject left uncleared for 3 days: one
+// line per subscription and subject, which the chart's LogQL rule alerts on.
+// Logged only after a run that worked, so a failing run never resolves it.
+func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every time.Duration) {
+	for {
+		if p, err := api.Prune(ctx, time.Now().Add(-keep)); err != nil {
+			slog.Error("retention", "err", err)
+		} else {
+			if p.Through > 0 {
+				slog.Info("retention", "through", p.Through, "deleted", p.Deleted, "moved", len(p.Moved), "gapped", p.Gapped)
+			}
+			stale, err := st.StaleDeadLetters(ctx, 72*time.Hour)
+			if err != nil {
+				slog.Error("retention: dead letters", "err", err)
+			}
+			for _, d := range stale {
+				slog.Warn("dead letter uncleared", "subscription", d.Subscription, "subject", d.Subject, "count", d.Count, "since", d.Since)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }
 
 // reconciler is nil, with a warning, when the App credentials are absent:

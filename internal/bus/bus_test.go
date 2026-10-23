@@ -25,6 +25,7 @@ import (
 type fixture struct {
 	db  *pgx.Conn
 	api bridgev1connect.BridgeServiceClient
+	srv *Server
 }
 
 // fakeTokens maps a bearer to its subject; every token is valid for exp.
@@ -86,13 +87,14 @@ func setup(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle(New(st, clients, tokens).Handler())
+	bus := New(st, clients, tokens)
+	mux.Handle(bus.Handler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
 	// PollEvery an hour: deliveries in these tests must come from the NOTIFY nudge.
 	MaxAttempts, RetryBase, PollEvery, MinStreamLife = 5, time.Millisecond, time.Hour, 100*time.Millisecond
-	return fixture{db: db, api: bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL)}
+	return fixture{db: db, api: bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL), srv: bus}
 }
 
 func as[T any](tok string, msg *T) *connect.Request[T] {
@@ -450,5 +452,65 @@ func TestStreamEndsAtExpiry(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream outlived its token")
+	}
+}
+
+// Retention seen from a subscriber: a moved stream ends Aborted, the next
+// Subscribe sends the gap first, and Replay from below the watermark too.
+func TestRetentionGap(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	stream, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: "bridge-core/ret", Types: []string{"dev."}, Subjects: []string{"ret/*"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan *bridgev1.SubscribeResponse, 8)
+	done := make(chan error, 1)
+	go func() {
+		for stream.Receive() {
+			got <- stream.Msg()
+		}
+		done <- stream.Err()
+	}()
+	f.publish(t, "core-token", ev("g1", "ret/a"))
+	f.publish(t, "core-token", ev("g2", "ret/a"))
+	first := (<-got).Event // in flight, never acked
+	if _, err := f.db.Exec(ctx, `UPDATE events SET ingested_at = now() - interval '40 days'`); err != nil {
+		t.Fatal(err)
+	}
+	p, err := f.srv.Prune(ctx, time.Now().Add(-30*24*time.Hour))
+	if err != nil || p.Through != first.Seq+1 {
+		t.Fatalf("prune %+v %v", p, err)
+	}
+	select {
+	case err := <-done:
+		if connect.CodeOf(err) != connect.CodeAborted {
+			t.Fatalf("moved stream ended with %v, want Aborted", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("moved stream kept running on its old cursor")
+	}
+
+	again, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: "bridge-core/ret", Types: []string{"dev."}, Subjects: []string{"ret/*"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if !again.Receive() {
+		t.Fatal(again.Err())
+	}
+	if g := again.Msg().Gap; g == nil || g.FromSeq != first.Seq || g.ToSeq != p.Through || again.Msg().Event != nil {
+		t.Fatalf("first message %+v, want the gap %d..%d", again.Msg(), first.Seq, p.Through)
+	}
+
+	rs, err := f.api.Replay(ctx, as("core-token", &bridgev1.ReplayRequest{Subscription: "bridge-core/ret", FromSeq: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rs.Receive() || rs.Msg().Gap == nil || rs.Msg().Gap.ToSeq != p.Through {
+		t.Fatalf("replay from below the watermark: %+v %v", rs.Msg(), rs.Err())
+	}
+	for rs.Receive() {
+		t.Fatalf("replay sent a deleted event %+v", rs.Msg())
 	}
 }

@@ -68,7 +68,32 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `Subscribe`. No ack,
     no cursor change, nothing written. Subscribers must be idempotent on
     `(source, id)` (or `seq`, which is the same event's log position) — never
-    on `id` alone: two clients can both publish id `1`.
+    on `id` alone: two clients can both publish id `1`. From at or below the
+    retention watermark, the first message is a `gap` (see Retention).
+
+### Retention
+
+Every hour the bridge deletes events ingested more than `BRIDGE_RETENTION`
+ago (default 30 days), by `ingested_at`, never by the publisher's `time`
+(infra-bootstrap ADR-0066 §6). In the same transaction:
+
+- An event at or past an uncleared dead letter on its subject is **kept**, so
+  the operator can still unpark it and `Replay` it. A subscription that still
+  has to receive a kept event (its subject is parked for someone else) keeps
+  its cursor just before it.
+- Every other subscription behind the deleted range moves its cursor past it,
+  so a quiet subscription never falls behind. Its live stream ends `Aborted`:
+  reconnect.
+- A subscription that loses a matching event it never acked records a **gap**
+  (widened by later runs, never replaced). Its next `Subscribe` sends one
+  message carrying `gap {from_seq, to_seq}` before any event: resync from your
+  own source of truth, and never Ack it. The gap stays until an Ack past
+  `to_seq`; an Ack never moves a cursor back.
+- Each subject left parked for 3 days is logged once per run (`dead letter
+  uncleared`), which the chart's Loki rule alerts on.
+
+Dedup on `(source, id)` holds only within retention: an id published again
+after its event was deleted is a new event.
 
 Not yet: an API for dead letters.
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
@@ -85,7 +110,8 @@ WHERE subscription = 'core' AND subject = 'github/MohammadBnei/editable-blog/pr/
 ```
 
 The dead-lettered events stay behind the cursor; `Replay` from the first one's
-`event_id` re-sends them.
+`event_id` re-sends them. Retention keeps them while their dead letter is
+uncleared, and deletes them on its next run once it is.
 
 ## Configuration
 
@@ -103,6 +129,7 @@ The dead-lettered events stay behind the cursor; `Replay` from the first one's
 | `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
 | `BRIDGE_RECONCILE_LOOKBACK` | Go duration, default `6h`. Keep event retention longer than this. |
 | `BRIDGE_ALERT_TOKEN` | Bearer token Alertmanager and Grafana send. Unset: both alert endpoints answer 503. |
+| `BRIDGE_RETENTION` | Go duration, default `720h` (30 days), at least `24h`. Keep it longer than `BRIDGE_RECONCILE_LOOKBACK` and than the longest consumer outage you accept. |
 | `PORT` | Default `8080`. |
 
 ## Tests

@@ -186,7 +186,7 @@ type Server struct {
 
 // stream is one Subscribe call. inflight is the event awaiting Ack/Nack, Seq 0 if none.
 type stream struct {
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	inflight event.Event
 	done     chan outcome // buffered 1: written once per claimed delivery
 }
@@ -202,6 +202,13 @@ func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
 
 // Handler mounts the service on a mux.
 func (s *Server) Handler() (string, http.Handler) { return bridgev1connect.NewBridgeServiceHandler(s) }
+
+// errMoved ends a stream whose cursor a deletion run moved; errReplaced one a
+// reconnect on the same name took over.
+var (
+	errMoved    = errors.New("retention moved the cursor: reconnect")
+	errReplaced = errors.New("replaced by a newer stream on this subscription")
+)
 
 // errExpired ends a stream at its token's exp, so the client reconnects with
 // a fresh one (ADR-0066 §1: deactivating an account takes effect within one
@@ -251,10 +258,14 @@ func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.C
 	return ctx, cancel, nil
 }
 
-// ended: the stream stopped because its token expired.
+// ended: why the bridge stopped the stream, as a status the client acts on
+// (nil when the client went away).
 func ended(ctx context.Context) error {
-	if errors.Is(context.Cause(ctx), errExpired) {
+	switch cause := context.Cause(ctx); {
+	case errors.Is(cause, errExpired):
 		return connect.NewError(connect.CodeUnauthenticated, errExpired)
+	case errors.Is(cause, errMoved), errors.Is(cause, errReplaced):
+		return connect.NewError(connect.CodeAborted, cause)
 	}
 	return nil
 }
@@ -340,7 +351,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 	defer cancel()
-	cursor, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+	cursor, gap, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
 	if err != nil {
 		return unavailable(ctx, err)
 	}
@@ -349,12 +360,17 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	if err := out.Send(nil); err != nil {
 		return err
 	}
+	if gap != nil {
+		if err := out.Send(&bridgev1.SubscribeResponse{Gap: &bridgev1.Gap{FromSeq: gap.From, ToSeq: gap.To}}); err != nil {
+			return err
+		}
+	}
 
-	ctx, cancel = context.WithCancel(ctx)
-	me := &stream{cancel: cancel, done: make(chan outcome, 1)}
+	ctx, stop := context.WithCancelCause(ctx)
+	me := &stream{cancel: stop, done: make(chan outcome, 1)}
 	s.mu.Lock()
 	if old := s.live[name]; old != nil {
-		old.cancel() // a reconnect replaces a stream that may be half-dead
+		old.cancel(errReplaced) // a reconnect replaces a stream that may be half-dead
 	}
 	s.live[name] = me
 	s.mu.Unlock()
@@ -364,7 +380,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 			delete(s.live, name)
 		}
 		s.mu.Unlock()
-		cancel()
+		stop(nil)
 	}()
 
 	for {
@@ -413,6 +429,28 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 			}
 		}
 	}
+}
+
+// Drop ends the live streams of subscriptions whose cursor moved under them
+// (a deletion run): they reconnect, reload the cursor and get any gap first.
+func (s *Server) Drop(names []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range names {
+		if st := s.live[n]; st != nil {
+			st.cancel(errMoved)
+		}
+	}
+}
+
+// Prune runs one deletion of what was ingested before cutoff, then ends the
+// streams it moved.
+func (s *Server) Prune(ctx context.Context, cutoff time.Time) (store.Pruned, error) {
+	p, err := s.st.Prune(ctx, cutoff)
+	if err == nil {
+		s.Drop(p.Moved)
+	}
+	return p, err
 }
 
 // claim takes the in-flight event off subscription sub's live stream, so
@@ -510,6 +548,15 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 	head, err := s.st.Head(ctx)
 	if err != nil {
 		return unavailable(ctx, err)
+	}
+	through, err := s.st.DeletedThrough(ctx)
+	if err != nil {
+		return unavailable(ctx, err)
+	}
+	if from := max(req.Msg.GetFromSeq(), 1); from <= through {
+		if err := out.Send(&bridgev1.ReplayResponse{Gap: &bridgev1.Gap{FromSeq: from, ToSeq: through}}); err != nil {
+			return err
+		}
 	}
 	for after := max(req.Msg.GetFromSeq()-1, 0); after < head; {
 		ds, err := s.st.Match(ctx, sub, after, 100)

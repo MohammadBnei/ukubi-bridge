@@ -81,6 +81,20 @@ env:
   - name: GOMEMLIMIT
     value: "100MiB"
 
+# A parked subject waits for the operator (README "Unparking a subject"); the
+# retention loop logs one line per subscription and subject uncleared for 3
+# days, every hour. The 2 h window spans two runs, so the alert holds steady
+# instead of resolving and refiring between them.
+logAlerts:
+  enabled: true
+  rules:
+    - uid: dead-letter-uncleared
+      title: Bridge dead letter uncleared for 3 days
+      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |= "dead letter uncleared" [2h]))'
+      threshold: 0
+      for: 5m
+      severity: warning
+
 livenessProbe:
   enabled: true
   path: /healthz
