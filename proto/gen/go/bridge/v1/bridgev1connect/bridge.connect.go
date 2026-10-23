@@ -59,8 +59,8 @@ type BridgeServiceClient interface {
 	// Replay re-streams logged events from from_seq up to the current head with
 	// replayed=true. It needs no ack and moves no cursor.
 	Replay(context.Context, *connect.Request[v1.ReplayRequest]) (*connect.ServerStreamForClient[v1.ReplayResponse], error)
-	// ConfirmGap clears the subscription's gap once the subscriber resynced. It
-	// is accepted only from the live stream that sent that version.
+	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
+	// a version a stream has sent is accepted.
 	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
 }
 
@@ -165,8 +165,8 @@ type BridgeServiceHandler interface {
 	// Replay re-streams logged events from from_seq up to the current head with
 	// replayed=true. It needs no ack and moves no cursor.
 	Replay(context.Context, *connect.Request[v1.ReplayRequest], *connect.ServerStream[v1.ReplayResponse]) error
-	// ConfirmGap clears the subscription's gap once the subscriber resynced. It
-	// is accepted only from the live stream that sent that version.
+	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
+	// a version a stream has sent is accepted.
 	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
 }
 

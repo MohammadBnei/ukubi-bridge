@@ -48,8 +48,8 @@ service BridgeService {
   // Replay re-streams logged events from from_seq up to the current head with
   // replayed=true. It needs no ack and moves no cursor.
   rpc Replay(ReplayRequest) returns (stream ReplayResponse);
-  // ConfirmGap clears the subscription's gap once the subscriber resynced. It
-  // is accepted only from the live stream that sent that version.
+  // ConfirmGap clears the subscription's gap once the subscriber resynced. Only
+  // a version a stream has sent is accepted.
   rpc ConfirmGap(ConfirmGapRequest) returns (ConfirmGapResponse);
 }
 
@@ -96,6 +96,7 @@ message Gap {
 message AckRequest {
   string subscription = 1;
   int64 seq = 2;
+  reserved 3; // gap_version, never released: ConfirmGap replaced it
 }
 
 message AckResponse {}

@@ -219,11 +219,15 @@ func (s *Store) Ack(ctx context.Context, name string, seq int64) error {
 // subscriber confirmed it resynced. current is false when a later run widened
 // it (version is no longer the stored one); confirming twice is current.
 func (s *Store) ClearGap(ctx context.Context, name string, version int64) (current bool, err error) {
-	err = s.db.QueryRow(ctx, `
-		UPDATE subscriptions SET
-			gap_from = CASE WHEN gap_ver = $2 THEN NULL ELSE gap_from END,
-			gap_to   = CASE WHEN gap_ver = $2 THEN NULL ELSE gap_to END
-		WHERE name = $1 RETURNING gap_ver = $2`, name, version).Scan(&current)
+	// Writes only when there is something to clear; a repeat or a stale
+	// version is answered by a read, without locking the row.
+	tag, err := s.db.Exec(ctx, `
+		UPDATE subscriptions SET gap_from = NULL, gap_to = NULL
+		WHERE name = $1 AND gap_ver = $2 AND gap_from IS NOT NULL`, name, version)
+	if err != nil || tag.RowsAffected() == 1 {
+		return err == nil, err
+	}
+	err = s.db.QueryRow(ctx, `SELECT gap_ver = $2 FROM subscriptions WHERE name = $1`, name, version).Scan(&current)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

@@ -508,11 +508,12 @@ func TestRetentionGap(t *testing.T) {
 		_, err := f.api.ConfirmGap(ctx, as("core-token", &bridgev1.ConfirmGapRequest{Subscription: "bridge-core/ret", Version: v}))
 		return err
 	}
-	if err := confirm(g.Version + 1); connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Fatalf("confirming a version never sent: %v, want FailedPrecondition", err)
-	}
+	// Confirmed right after receipt: the server recorded the version before sending.
 	if err := confirm(g.Version); err != nil {
 		t.Fatalf("confirming the gap: %v", err)
+	}
+	if err := confirm(g.Version + 1); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("confirming a version never sent: %v, want FailedPrecondition", err)
 	}
 	var gapTo *int64
 	if err := f.db.QueryRow(ctx, `SELECT gap_to FROM subscriptions WHERE name = 'bridge-core/ret'`).Scan(&gapTo); err != nil {

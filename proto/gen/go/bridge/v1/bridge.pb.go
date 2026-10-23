@@ -872,11 +872,11 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x03Gap\x12\x19\n" +
 	"\bfrom_seq\x18\x01 \x01(\x03R\afromSeq\x12\x15\n" +
 	"\x06to_seq\x18\x02 \x01(\x03R\x05toSeq\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\x03R\aversion\"B\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\"H\n" +
 	"\n" +
 	"AckRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x03R\x03seq\"\r\n" +
+	"\x03seq\x18\x02 \x01(\x03R\x03seqJ\x04\b\x03\x10\x04\"\r\n" +
 	"\vAckResponse\"Q\n" +
 	"\x11ConfirmGapRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x18\n" +

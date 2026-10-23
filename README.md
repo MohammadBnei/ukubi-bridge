@@ -89,12 +89,13 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
   (widened by later runs, never replaced). Its next `Subscribe` sends one
   message carrying `gap {from_seq, to_seq, version}` before any event: resync
   from your own source of truth, then call `ConfirmGap(subscription,
-  version)` on that same live stream's subscription. Its live stream ends
+  version)`. Its live stream ends
   `Aborted`, so it reconnects to that gap (also when a run gaps it while it is
   connecting). The gap is sent on every reconnect until confirmed; a run that
   widens it bumps `version`, so confirming an older one is `FailedPrecondition`
-  (reconnect for the current one). Confirming twice is fine; confirming
-  without a live stream that sent that version is refused. An Ack never moves a
+  (reconnect for the current one). Confirming twice is fine, also after the
+  stream ended (a resync may outlast a token); confirming a version no stream
+  was sent is refused. An Ack never moves a
   cursor back. A stream replaced by a newer `Subscribe` on the same name ends
   cleanly: do not reconnect on that.
 - A dead letter is never recorded for an event already deleted.
