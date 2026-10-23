@@ -26,17 +26,35 @@ func TestHelmClientTable(t *testing.T) {
 	if !core.Privileged || game.Privileged || push.Privileged {
 		t.Fatal("only bridge-core is privileged")
 	}
-	human := []string{"dev.bnei.fleet.session.", "dev.bnei.game."}
-	for _, ty := range human {
-		if core.mayRead([]string{ty}, nil) {
+	// No rule of core's may reach a human-facing type, on any subject; push's
+	// rules reach only needs_you. Checked on the rule prefixes themselves.
+	reaches := func(c Client, ty string) bool {
+		for _, r := range c.Subscribe {
+			for _, p := range r.Types {
+				if strings.HasPrefix(ty, p) || strings.HasPrefix(p, ty) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, ty := range []string{"dev.bnei.fleet.session.", "dev.bnei.game."} {
+		if reaches(core, ty) {
 			t.Errorf("bridge-core can read %s", ty)
+		}
+	}
+	for _, r := range push.Subscribe {
+		for _, p := range r.Types {
+			if !strings.HasPrefix(p, "dev.bnei.game.needs_you.") {
+				t.Errorf("bridge-push reads %s", p)
+			}
 		}
 	}
 	if game.mayRead([]string{"dev.bnei.fleet.session."}, []string{"fleet/client/other/*"}) ||
 		!game.mayRead([]string{"dev.bnei.fleet.session."}, []string{"fleet/client/game/*"}) {
 		t.Error("bridge-game reads exactly its own sessions")
 	}
-	if push.mayRead([]string{"dev.bnei.github."}, nil) || len(push.PublishTypes) != 0 {
-		t.Error("bridge-push reads only needs_you and publishes nothing")
+	if len(push.PublishTypes) != 0 {
+		t.Error("bridge-push publishes nothing")
 	}
 }

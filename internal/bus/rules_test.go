@@ -64,6 +64,7 @@ func TestParseClients(t *testing.T) {
 		"subject without slash":    `{"bridge-game": {"subscribe": [{"types": ["dev.bnei.game."], "subjects": ["fleet/client/game"]}]}}`,
 		"publish subject no slash": `{"bridge-game": {"publish_subjects": ["game"]}}`,
 		"trailing data":            `{"bridge-game": {}} {"bridge-push": {}}`,
+		"trailing brace":           `{"bridge-game": {}} }`,
 	}
 	for name, js := range bad {
 		if _, err := ParseClients(js); err == nil {

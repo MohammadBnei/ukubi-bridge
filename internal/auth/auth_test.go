@@ -122,6 +122,10 @@ func TestNoCertRefusesAll(t *testing.T) {
 	if _, err := New(iss, aud, `-----BEGIN CERTIFICATE-----\nMIIB...`); err == nil {
 		t.Fatal("a set certificate with no PEM block was accepted as none")
 	}
+	pemOK := certPEM(t, key(t))
+	if _, err := New(iss, aud, pemOK+pemOK[:len(pemOK)-30]); err == nil {
+		t.Fatal("a truncated second certificate was dropped silently")
+	}
 	k := key(t)
 	if _, _, err := v.Verify(sign(t, jose.RS256, k, good(time.Now()))); err != ErrNoKey {
 		t.Fatalf("got %v, want ErrNoKey", err)

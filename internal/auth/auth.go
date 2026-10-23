@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -45,6 +46,9 @@ func New(issuer, clientID, certPEM string) (*Verifier, error) {
 	for {
 		var b *pem.Block
 		if b, rest = pem.Decode(rest); b == nil {
+			if len(bytes.TrimSpace(rest)) > 0 {
+				return nil, errors.New("BRIDGE_OIDC_CERT: unreadable data after the last certificate")
+			}
 			break
 		}
 		if b.Type != "CERTIFICATE" {
@@ -95,7 +99,7 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 			break
 		}
 		if !errors.Is(err, jose.ErrCryptoFailure) {
-			return "", time.Time{}, fmt.Errorf("token claims: %w", err) // signed, but unreadable
+			return "", time.Time{}, fmt.Errorf("token: %w", err) // malformed header or claims
 		}
 	}
 	if !verified {

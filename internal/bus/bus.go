@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"slices"
@@ -67,7 +68,7 @@ func ParseClients(js string) (map[string]Client, error) {
 	if err := dec.Decode(&clients); err != nil {
 		return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %w", err)
 	}
-	if dec.More() {
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return nil, errors.New("BRIDGE_API_CLIENTS: data after the client table")
 	}
 	for name, c := range clients {
@@ -235,18 +236,18 @@ func (s *Server) owns(h http.Header, sub string) (Client, time.Time, error) {
 	return c, exp, nil
 }
 
-// StreamMargin: a stream ends this long before its token's exp, so the Ack
-// for its last delivery still carries a valid token; a token with less left
-// cannot open one (it would end at once and the client would loop).
-var StreamMargin = 15 * time.Second
+// MinStreamLife: a token with less left cannot open a stream, which would
+// end at once and loop the client. Under golang.org/x/oauth2's 10 s refresh
+// delta, so a client reconnecting with its cached token is not refused.
+var MinStreamLife = 5 * time.Second
 
-// untilExpiry bounds a stream by its token.
+// untilExpiry bounds a stream by its token: it ends at exp. An event in
+// flight then is redelivered on the next stream, as after any disconnect.
 func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.CancelFunc, error) {
-	end := exp.Add(-StreamMargin)
-	if !end.After(time.Now()) {
+	if exp.Before(time.Now().Add(MinStreamLife)) {
 		return nil, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("token too close to expiry to open a stream"))
 	}
-	ctx, cancel := context.WithDeadlineCause(ctx, end, errExpired)
+	ctx, cancel := context.WithDeadlineCause(ctx, exp, errExpired)
 	return ctx, cancel, nil
 }
 
@@ -489,11 +490,16 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 	if err != nil {
 		return err
 	}
+	ctx, cancel, err := untilExpiry(ctx, exp)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	// Replay reads with the filter stored by Subscribe: re-check it, so a
 	// client that lost a right cannot read history with it.
 	types, subjects, found, err := s.st.Filter(ctx, sub)
 	if err != nil {
-		return connect.NewError(connect.CodeUnavailable, err)
+		return unavailable(ctx, err)
 	}
 	if !found {
 		return connect.NewError(connect.CodeNotFound, fmt.Errorf("no subscription %q", sub))
@@ -501,11 +507,6 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 	if !c.mayRead(types, subjects) {
 		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may no longer read %q's filter", c.Name, sub))
 	}
-	ctx, cancel, err := untilExpiry(ctx, exp)
-	if err != nil {
-		return err
-	}
-	defer cancel()
 	head, err := s.st.Head(ctx)
 	if err != nil {
 		return unavailable(ctx, err)

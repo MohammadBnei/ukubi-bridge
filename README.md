@@ -48,9 +48,10 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   - `Subscribe(name, types, subjects)` — `name` is the client's own name or
     `<name>/<suffix>`. The whole filter must fit one of the client's
     `subscribe` rules, and `types` cannot be empty. The stream ends
-    `Unauthenticated` 15 s before the token's expiry, so the Ack of its last
-    delivery still has a valid token: reconnect with a fresh one (the cursor
-    is kept). A token with less than 15 s left cannot open a stream. A new subscription starts at the head of the log.
+    `Unauthenticated` at the token's expiry: reconnect with a fresh token (the
+    cursor is kept; an event in flight is redelivered, as after any
+    disconnect). A token with less than 5 s left cannot open a stream, so
+    refresh earlier than that (golang.org/x/oauth2's 10 s default does). A new subscription starts at the head of the log.
     Delivery is head-of-line: the next matching event is sent only once the
     current one is acked. A NOTIFY sent inside each insert wakes the stream;
     it also polls every 30 s. A second `Subscribe` on the same name replaces
