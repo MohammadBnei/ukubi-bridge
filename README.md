@@ -114,15 +114,14 @@ after its event was deleted is a new event.
 Not yet:
 
 - An API for dead letters.
-- Retention. No code deletes events; `events` grows until a pruning job is
-  written (`schema.sql` and `BRIDGE_RECONCILE_LOOKBACK` below assume one).
-- Any API client. agent-fleet's consumer (its ADR-0071) is "Accepted, not
-  built", and nothing else calls `Publish` or `Subscribe`. Events come in
-  only through the webhooks.
+- A live API client. No client can call until `BRIDGE_OIDC_CERT` is set and
+  the authentik `ukubi-bridge-api` provider exists (infra-bootstrap
+  ADR-0066). agent-fleet's consumer (its ADR-0071) is merged (#324/#325), not
+  yet released.
 
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
-done here: the bridge has no thread ownership, so core's dispatcher is to drop
-them and the per-thread agent-wake cap to bound loops, once they are built.
+done here: the bridge has no thread ownership, so core's dispatcher drops
+them and its per-thread agent-wake cap bounds loops.
 
 ### Unparking a subject
 

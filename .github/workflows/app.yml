@@ -7,10 +7,8 @@
 #   - the deploy job needs always() && result == 'success'
 #   - --layers, or buildah caches nothing; --pull=newer, or the Go base image
 #     stays at the patch the box first pulled
-#   - the bump pushes with a token from the release GitHub App (environment
-#     `release`), not GITHUB_TOKEN. Unlike GITHUB_TOKEN, an App-token push DOES
-#     trigger workflows; the bump touches only helm/values.yaml and helm/** is
-#     not a push trigger path, so it cannot loop
+#   - the bump pushes with GITHUB_TOKEN, which never triggers another run
+#     (and helm/** is not a trigger path, so the bump cannot loop either)
 #
 # This repo is PUBLIC, and that `if:` on build-push does NOT keep fork PRs off
 # the build runner. A pull_request run uses the workflow file from the PR's
@@ -37,7 +35,8 @@ on:
       - 'Dockerfile'
       - '.github/workflows/app.yml'
 
-# Read-only by default; a job grants itself more.
+# Read-only by default; the jobs that run PR code keep it. Only deploy, which
+# runs on main alone, raises its own GITHUB_TOKEN to contents: write.
 permissions:
   contents: read
 
@@ -176,31 +175,17 @@ jobs:
     # A dispatch on another branch builds that branch; only main deploys.
     if: always() && needs.build-push.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Holds RELEASE_APP_CLIENT_ID (var) and RELEASE_APP_PRIVATE_KEY (secret).
-    environment: release
     concurrency:
       group: app-deploy
       cancel-in-progress: false
-    # The push uses the App token below, not GITHUB_TOKEN.
     permissions:
-      contents: read
+      contents: write
     env:
       TAG: ${{ needs.build-push.outputs.tag }}
     steps:
-      - id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      # checkout persists this token as the origin credential, so the pull and
-      # push below run as the release App.
       - uses: actions/checkout@v5
         with:
           ref: main
-          token: ${{ steps.app-token.outputs.token }}
 
       - name: Bump the pinned image tag
         run: |
