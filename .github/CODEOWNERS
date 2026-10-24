@@ -1,4 +1,0 @@
-# The API client table (helm/values.yaml, BRIDGE_API_CLIENTS) grants publish
-# and subscribe rights, so it sits behind its owner (infra-bootstrap ADR-0066).
-# Inert until a ruleset on main requires code-owner review; none does yet.
-/helm/values.yaml @MohammadBnei

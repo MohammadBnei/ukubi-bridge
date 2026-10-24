@@ -35,8 +35,9 @@ on:
       - 'Dockerfile'
       - '.github/workflows/app.yml'
 
-# Read-only by default; the jobs that run PR code keep it. Only deploy, which
-# runs on main alone, raises its own GITHUB_TOKEN to contents: write.
+# The default for a job with no permissions block of its own. Every job here
+# declares one today (deploy alone, on main, has contents: write), so this
+# only covers a job added later without one.
 permissions:
   contents: read
 
