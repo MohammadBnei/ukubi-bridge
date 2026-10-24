@@ -47,10 +47,63 @@ env:
   # The ukubi-fleet App's bot (App id 5395733, infra-bootstrap ADR-0062).
   - name: BRIDGE_AGENT_LOGINS
     value: "ukubi-fleet[bot]"
+  # API clients are authentik service accounts (infra-bootstrap ADR-0066):
+  # this table holds what each may publish and read, never a secret. Explicit
+  # env, so a key of the same name in the envFrom Secret cannot override it.
+  # Only bridge-core may be privileged; one subscription's filter must fit one
+  # of its client's rules.
+  - name: BRIDGE_API_CLIENTS
+    value: |
+      {
+        "bridge-core": {"kind": "agent", "privileged": true,
+          "publish_types": ["dev.bnei.agent.", "dev.bnei.fleet.session."],
+          "publish_subjects": ["fleet/", "github/", "alert/", "agent/"],
+          "subscribe": [{"types": ["dev.bnei.github.", "dev.bnei.alert.", "dev.bnei.agent."], "subjects": [""]}]},
+        "bridge-game": {"kind": "bot",
+          "publish_types": ["dev.bnei.game."], "publish_subjects": ["game/"],
+          "subscribe": [{"types": ["dev.bnei.fleet.session."], "subjects": ["fleet/client/game/"]},
+                        {"types": ["dev.bnei.alert."], "subjects": [""]}]},
+        "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
+          "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]}
+      }
+  - name: BRIDGE_OIDC_ISSUER
+    value: "https://authentik.bnei.dev/application/o/ukubi-bridge-api/"
+  - name: BRIDGE_OIDC_CLIENT_ID
+    value: "ukubi-bridge-api"
+  # The trust anchor: authentik's signing certificate (PEM, one per key during
+  # a rotation). Empty until the provider exists (ADR-0066 rollout): the API
+  # then refuses every call and the webhooks keep working.
+  - name: BRIDGE_OIDC_CERT
+    value: ""
+  # Compared with the pinned certificate hourly; a mismatch only logs.
+  - name: BRIDGE_OIDC_JWKS_URL
+    value: "http://platform-authentik-server.authentik.svc.cluster.local/application/o/ukubi-bridge-api/jwks/"
   # Under limits.memory (128Mi), so the GC works harder before the kernel
   # OOM-kills the pod. A soft limit: it does not cap the allocation itself.
   - name: GOMEMLIMIT
     value: "100MiB"
+
+# A parked subject waits for the operator (README "Unparking a subject"); the
+# retention loop logs one line per subscription and subject uncleared for 3
+# days, every hour. The 2 h window spans two runs, so the alert holds steady
+# instead of resolving and refiring between them.
+logAlerts:
+  enabled: true
+  rules:
+    - uid: dead-letter-uncleared
+      title: Bridge dead letter uncleared for 3 days
+      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |= "dead letter uncleared" [2h]))'
+      threshold: 0
+      for: 5m
+      severity: warning
+    # Two failed runs in 3 h (one line per run): retention is stuck and the
+    # log grows, or the rule above may be blind.
+    - uid: retention-failing
+      title: Bridge retention failing
+      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |= "retention failed" [3h]))'
+      threshold: 1
+      for: 5m
+      severity: warning
 
 livenessProbe:
   enabled: true

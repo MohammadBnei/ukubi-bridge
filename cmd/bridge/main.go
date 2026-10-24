@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
+	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
@@ -29,10 +30,23 @@ func main() {
 		slog.Error("BRIDGE_GITHUB_WEBHOOK_SECRET is required")
 		os.Exit(1)
 	}
-	clients, err := bus.ParseClients(os.Getenv("BRIDGE_CLIENTS"))
+	// API clients are authentik service accounts (infra-bootstrap ADR-0066):
+	// the table holds permissions, the pinned certificate is the trust anchor.
+	if os.Getenv("BRIDGE_CLIENTS") != "" {
+		slog.Warn("BRIDGE_CLIENTS is ignored: clients sign in through authentik (BRIDGE_API_CLIENTS)")
+	}
+	clients, err := bus.ParseClients(os.Getenv("BRIDGE_API_CLIENTS"))
 	if err != nil {
 		slog.Error("clients", "err", err)
 		os.Exit(1)
+	}
+	tokens, err := auth.New(os.Getenv("BRIDGE_OIDC_ISSUER"), os.Getenv("BRIDGE_OIDC_CLIENT_ID"), os.Getenv("BRIDGE_OIDC_CERT"))
+	if err != nil {
+		slog.Error("oidc", "err", err)
+		os.Exit(1)
+	}
+	if !tokens.Pinned() {
+		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
 	}
 	st, err := store.Open(ctx, os.Getenv("BRIDGE_DATABASE_URL"))
 	if err != nil {
@@ -47,12 +61,25 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
-	mux.Handle(bus.New(st, clients).Handler())
+	api := bus.New(st, clients, tokens)
+	mux.Handle(api.Handler())
 
 	// Unset token: both answer 503 rather than serve open.
 	alertToken := os.Getenv("BRIDGE_ALERT_TOKEN")
 	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", alertToken, st.Insert))
 	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", alertToken, st.Insert))
+
+	if u := os.Getenv("BRIDGE_OIDC_JWKS_URL"); u != "" {
+		go tokens.Watch(ctx, u, &http.Client{Timeout: 10 * time.Second}, time.Hour)
+	}
+	keep := 30 * 24 * time.Hour
+	if v := os.Getenv("BRIDGE_RETENTION"); v != "" {
+		if keep, err = time.ParseDuration(v); err != nil || keep < 24*time.Hour {
+			slog.Error("BRIDGE_RETENTION must be a Go duration of at least 24h", "value", v)
+			os.Exit(1)
+		}
+	}
+	go retain(ctx, api, st, keep, time.Hour)
 
 	if r := reconciler(st); r != nil {
 		go r.Loop(ctx, 10*time.Minute)
@@ -147,6 +174,33 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "trusted", e.Trusted, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
+}
+
+// retain deletes events older than keep every interval (infra-bootstrap
+// ADR-0066 §6), then logs each parked subject left uncleared for 3 days: one
+// line per subscription and subject, which the chart's LogQL rule alerts on.
+// A run that fails either step logs one "retention failed" line, which has its
+// own rule.
+func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every time.Duration) {
+	for {
+		p, perr := api.Prune(ctx, time.Now().Add(-keep))
+		if perr == nil && p.Through > 0 {
+			slog.Info("retention", "through", p.Through, "deleted", p.Deleted, "moved", len(p.Moved), "gapped", p.Gapped)
+		}
+		// Whatever the run did: a failing run must not silence this alert.
+		stale, serr := st.StaleDeadLetters(ctx, 72*time.Hour)
+		if err := errors.Join(perr, serr); err != nil && ctx.Err() == nil {
+			slog.Error("retention failed", "err", err) // one line per run: the failing rule counts runs
+		}
+		for _, d := range stale {
+			slog.Warn("dead letter uncleared", "subscription", d.Subscription, "subject", d.Subject, "count", d.Count, "since", d.Since)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }
 
 // reconciler is nil, with a warning, when the App credentials are absent:

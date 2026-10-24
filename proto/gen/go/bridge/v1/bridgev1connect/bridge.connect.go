@@ -43,6 +43,9 @@ const (
 	BridgeServiceNackProcedure = "/bridge.v1.BridgeService/Nack"
 	// BridgeServiceReplayProcedure is the fully-qualified name of the BridgeService's Replay RPC.
 	BridgeServiceReplayProcedure = "/bridge.v1.BridgeService/Replay"
+	// BridgeServiceConfirmGapProcedure is the fully-qualified name of the BridgeService's ConfirmGap
+	// RPC.
+	BridgeServiceConfirmGapProcedure = "/bridge.v1.BridgeService/ConfirmGap"
 )
 
 // BridgeServiceClient is a client for the bridge.v1.BridgeService service.
@@ -56,6 +59,9 @@ type BridgeServiceClient interface {
 	// Replay re-streams logged events from from_seq up to the current head with
 	// replayed=true. It needs no ack and moves no cursor.
 	Replay(context.Context, *connect.Request[v1.ReplayRequest]) (*connect.ServerStreamForClient[v1.ReplayResponse], error)
+	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
+	// a version a stream has sent is accepted.
+	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
 }
 
 // NewBridgeServiceClient constructs a client for the bridge.v1.BridgeService service. By default,
@@ -99,16 +105,23 @@ func NewBridgeServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(bridgeServiceMethods.ByName("Replay")),
 			connect.WithClientOptions(opts...),
 		),
+		confirmGap: connect.NewClient[v1.ConfirmGapRequest, v1.ConfirmGapResponse](
+			httpClient,
+			baseURL+BridgeServiceConfirmGapProcedure,
+			connect.WithSchema(bridgeServiceMethods.ByName("ConfirmGap")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // bridgeServiceClient implements BridgeServiceClient.
 type bridgeServiceClient struct {
-	publish   *connect.Client[v1.PublishRequest, v1.PublishResponse]
-	subscribe *connect.Client[v1.SubscribeRequest, v1.SubscribeResponse]
-	ack       *connect.Client[v1.AckRequest, v1.AckResponse]
-	nack      *connect.Client[v1.NackRequest, v1.NackResponse]
-	replay    *connect.Client[v1.ReplayRequest, v1.ReplayResponse]
+	publish    *connect.Client[v1.PublishRequest, v1.PublishResponse]
+	subscribe  *connect.Client[v1.SubscribeRequest, v1.SubscribeResponse]
+	ack        *connect.Client[v1.AckRequest, v1.AckResponse]
+	nack       *connect.Client[v1.NackRequest, v1.NackResponse]
+	replay     *connect.Client[v1.ReplayRequest, v1.ReplayResponse]
+	confirmGap *connect.Client[v1.ConfirmGapRequest, v1.ConfirmGapResponse]
 }
 
 // Publish calls bridge.v1.BridgeService.Publish.
@@ -136,6 +149,11 @@ func (c *bridgeServiceClient) Replay(ctx context.Context, req *connect.Request[v
 	return c.replay.CallServerStream(ctx, req)
 }
 
+// ConfirmGap calls bridge.v1.BridgeService.ConfirmGap.
+func (c *bridgeServiceClient) ConfirmGap(ctx context.Context, req *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error) {
+	return c.confirmGap.CallUnary(ctx, req)
+}
+
 // BridgeServiceHandler is an implementation of the bridge.v1.BridgeService service.
 type BridgeServiceHandler interface {
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
@@ -147,6 +165,9 @@ type BridgeServiceHandler interface {
 	// Replay re-streams logged events from from_seq up to the current head with
 	// replayed=true. It needs no ack and moves no cursor.
 	Replay(context.Context, *connect.Request[v1.ReplayRequest], *connect.ServerStream[v1.ReplayResponse]) error
+	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
+	// a version a stream has sent is accepted.
+	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
 }
 
 // NewBridgeServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -186,6 +207,12 @@ func NewBridgeServiceHandler(svc BridgeServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(bridgeServiceMethods.ByName("Replay")),
 		connect.WithHandlerOptions(opts...),
 	)
+	bridgeServiceConfirmGapHandler := connect.NewUnaryHandler(
+		BridgeServiceConfirmGapProcedure,
+		svc.ConfirmGap,
+		connect.WithSchema(bridgeServiceMethods.ByName("ConfirmGap")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/bridge.v1.BridgeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BridgeServicePublishProcedure:
@@ -198,6 +225,8 @@ func NewBridgeServiceHandler(svc BridgeServiceHandler, opts ...connect.HandlerOp
 			bridgeServiceNackHandler.ServeHTTP(w, r)
 		case BridgeServiceReplayProcedure:
 			bridgeServiceReplayHandler.ServeHTTP(w, r)
+		case BridgeServiceConfirmGapProcedure:
+			bridgeServiceConfirmGapHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -225,4 +254,8 @@ func (UnimplementedBridgeServiceHandler) Nack(context.Context, *connect.Request[
 
 func (UnimplementedBridgeServiceHandler) Replay(context.Context, *connect.Request[v1.ReplayRequest], *connect.ServerStream[v1.ReplayResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("bridge.v1.BridgeService.Replay is not implemented"))
+}
+
+func (UnimplementedBridgeServiceHandler) ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bridge.v1.BridgeService.ConfirmGap is not implemented"))
 }
