@@ -121,13 +121,15 @@ func withKey(err error) error {
 		addKey(e, keyInternal, "")
 		return e
 	}
-	// A copy, never ce itself: a handler may return a shared sentinel, which adding to would race across requests
-	// and stay keyed for in-process callers.
-	e := connect.NewError(ce.Code(), ce.Unwrap())
-	for _, d := range ce.Details() {
+	// A copy, never ce itself: a handler may return a shared sentinel, which adding to would race across requests and
+	// stay keyed for in-process callers. Meta() makes the map on its first call, a write: so read a struct copy of ce,
+	// whose Meta() makes it on the copy only.
+	src := *ce
+	e := connect.NewError(src.Code(), src.Unwrap())
+	for _, d := range src.Details() {
 		e.AddDetail(d)
 	}
-	for k, v := range ce.Meta() {
+	for k, v := range src.Meta() {
 		e.Meta()[k] = append([]string(nil), v...)
 	}
 	addKey(e, keyInternal, "")

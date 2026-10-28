@@ -371,30 +371,42 @@ func TestContextCodes(t *testing.T) {
 }
 
 // TestSentinelUnchanged: keying never changes the handler's error, which may be a shared sentinel: concurrent requests
-// do not race on it (run with -race), and it stays unkeyed with its meta and its one detail, while the copy carries that detail, then the key.
+// do not race on it (run with -race), and it stays unkeyed with what it had, while the copy carries that, then the key.
+// Both forms run: one with meta and a detail, and one with neither, whose Meta() would create the map on first read.
 func TestSentinelUnchanged(t *testing.T) {
-	sentinel := connect.NewError(connect.CodeNotFound, errors.New("no such subscription"))
-	sentinel.Meta().Set("X-Why", "gone")
 	why, err := connect.NewErrorDetail(wrapperspb.String("gone"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentinel.AddDetail(why)
-	var wg sync.WaitGroup
-	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			got := withKey(sentinel)
-			var ce *connect.Error
-			if k, _, ok := keyOf(got); !ok || k != "server.internal" || !errors.As(got, &ce) || ce.Code() != connect.CodeNotFound ||
-				ce.Message() != "no such subscription" || ce.Meta().Get("X-Why") != "gone" || len(ce.Details()) != 2 || ce.Details()[0].Type() != why.Type() {
-				t.Errorf("keyed: %v", got)
-			}
-		}()
-	}
-	wg.Wait()
-	if _, _, ok := keyOf(sentinel); ok || len(sentinel.Details()) != 1 {
-		t.Errorf("the sentinel was changed: %d details", len(sentinel.Details()))
+	full := connect.NewError(connect.CodeNotFound, errors.New("no such subscription"))
+	full.Meta().Set("X-Why", "gone")
+	full.AddDetail(why)
+	for _, c := range []struct {
+		name     string
+		sentinel *connect.Error
+		details  int // the sentinel's own
+		meta     string
+	}{
+		{"with meta and detail", full, 1, "gone"},
+		{"bare", connect.NewError(connect.CodeNotFound, errors.New("no such subscription")), 0, ""},
+	} {
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got := withKey(c.sentinel)
+				var ce *connect.Error
+				if k, _, ok := keyOf(got); !ok || k != "server.internal" || !errors.As(got, &ce) || ce.Code() != connect.CodeNotFound ||
+					ce.Message() != "no such subscription" || ce.Meta().Get("X-Why") != c.meta || len(ce.Details()) != c.details+1 ||
+					(c.details > 0 && ce.Details()[0].Type() != why.Type()) {
+					t.Errorf("%s: keyed: %v", c.name, got)
+				}
+			}()
+		}
+		wg.Wait()
+		if _, _, ok := keyOf(c.sentinel); ok || len(c.sentinel.Details()) != c.details || c.sentinel.Meta().Get("X-Why") != c.meta {
+			t.Errorf("%s: the sentinel was changed: %d details", c.name, len(c.sentinel.Details()))
+		}
 	}
 }
