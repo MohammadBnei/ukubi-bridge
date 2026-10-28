@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -25,22 +24,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	secret := os.Getenv("BRIDGE_GITHUB_WEBHOOK_SECRET")
-	if secret == "" {
-		slog.Error("BRIDGE_GITHUB_WEBHOOK_SECRET is required")
+	cfg, cerr := fromProcess()
+	if cerr != nil {
+		cerr.log()
 		os.Exit(1)
 	}
 	// API clients are authentik service accounts (infra-bootstrap ADR-0066):
 	// the table holds permissions, the pinned certificate is the trust anchor.
-	if os.Getenv("BRIDGE_CLIENTS") != "" {
+	if cfg.LegacyClients {
 		slog.Warn("BRIDGE_CLIENTS is ignored: clients sign in through authentik (BRIDGE_API_CLIENTS)")
 	}
-	clients, err := bus.ParseClients(os.Getenv("BRIDGE_API_CLIENTS"))
+	clients, err := bus.ParseClients(cfg.APIClients)
 	if err != nil {
 		slog.Error("clients", "err", err)
 		os.Exit(1)
 	}
-	tokens, err := auth.New(os.Getenv("BRIDGE_OIDC_ISSUER"), os.Getenv("BRIDGE_OIDC_CLIENT_ID"), os.Getenv("BRIDGE_OIDC_CERT"))
+	tokens, err := auth.New(cfg.OIDC.Issuer, cfg.OIDC.ClientID, cfg.OIDC.Cert)
 	if err != nil {
 		slog.Error("oidc", "err", err)
 		os.Exit(1)
@@ -48,47 +47,35 @@ func main() {
 	if !tokens.Pinned() {
 		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
 	}
-	st, err := store.Open(ctx, os.Getenv("BRIDGE_DATABASE_URL"))
+	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("open store", "err", err)
 		os.Exit(1)
 	}
 	defer st.Close()
 
-	// Agents are never added to trusted: see github.Policy.
-	policy := github.Policy{Trusted: set(os.Getenv("BRIDGE_TRUSTED_LOGINS")), Agents: set(os.Getenv("BRIDGE_AGENT_LOGINS"))}
+	policy := github.Policy{Trusted: cfg.Trusted, Agents: cfg.Agents}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(secret)))
+	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
 	api := bus.New(st, clients, tokens)
 	mux.Handle(api.Handler())
 
 	// Unset token: both answer 503 rather than serve open.
-	alertToken := os.Getenv("BRIDGE_ALERT_TOKEN")
-	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", alertToken, st.Insert))
-	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", alertToken, st.Insert))
+	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.Insert))
+	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.Insert))
 
-	if u := os.Getenv("BRIDGE_OIDC_JWKS_URL"); u != "" {
-		go tokens.Watch(ctx, u, &http.Client{Timeout: 10 * time.Second}, time.Hour)
+	if cfg.OIDC.JWKSURL != "" {
+		go tokens.Watch(ctx, cfg.OIDC.JWKSURL, &http.Client{Timeout: 10 * time.Second}, time.Hour)
 	}
-	keep := 30 * 24 * time.Hour
-	if v := os.Getenv("BRIDGE_RETENTION"); v != "" {
-		if keep, err = time.ParseDuration(v); err != nil || keep < 24*time.Hour {
-			slog.Error("BRIDGE_RETENTION must be a Go duration of at least 24h", "value", v)
-			os.Exit(1)
-		}
-	}
-	go retain(ctx, api, st, keep, time.Hour)
+	go retain(ctx, api, st, cfg.Retention, time.Hour)
 
-	if r := reconciler(st); r != nil {
+	if r := reconciler(st, cfg.App); r != nil {
 		go r.Loop(ctx, 10*time.Minute)
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	port := cfg.Port
 	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
 	// alongside Connect and gRPC-Web.
 	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols)}
@@ -206,34 +193,11 @@ func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every t
 
 // reconciler is nil, with a warning, when the App credentials are absent:
 // ingest still works, lost deliveries just stay lost.
-func reconciler(st *store.Store) *github.Reconciler {
-	appID, pemKey := os.Getenv("BRIDGE_GITHUB_APP_ID"), os.Getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
-	if appID == "" || pemKey == "" {
+func reconciler(st *store.Store, app *AppConfig) *github.Reconciler {
+	if app == nil {
 		slog.Warn("github reconcile disabled: BRIDGE_GITHUB_APP_ID or BRIDGE_GITHUB_APP_PRIVATE_KEY unset")
 		return nil
 	}
-	key, err := github.ParseKey(pemKey)
-	if err != nil {
-		slog.Error("BRIDGE_GITHUB_APP_PRIVATE_KEY", "err", err)
-		os.Exit(1)
-	}
-	lookback := 6 * time.Hour
-	if v := os.Getenv("BRIDGE_RECONCILE_LOOKBACK"); v != "" {
-		if lookback, err = time.ParseDuration(v); err != nil {
-			slog.Error("BRIDGE_RECONCILE_LOOKBACK", "err", err)
-			os.Exit(1)
-		}
-	}
-	return &github.Reconciler{API: "https://api.github.com", AppID: appID, Key: key, Lookback: lookback,
+	return &github.Reconciler{API: "https://api.github.com", AppID: app.ID, Key: app.Key, Lookback: app.Lookback,
 		Known: st.Known, Client: &http.Client{Timeout: 30 * time.Second}}
-}
-
-func set(csv string) map[string]bool {
-	m := map[string]bool{}
-	for _, s := range strings.Split(csv, ",") {
-		if s = strings.TrimSpace(s); s != "" {
-			m[s] = true
-		}
-	}
-	return m
 }
