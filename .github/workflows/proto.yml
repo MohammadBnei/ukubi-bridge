@@ -1,0 +1,98 @@
+# The buf-managed proto schema: lint, breaking against main, and a drift check
+# that the committed generated Go is what the pinned plugins produce.
+# The same three checks as agent-fleet's go.yml `buf` job (Go plugins only).
+name: proto
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only: every step runs code from the PR (buf plugins), and a PR may be an
+# agent's. Nothing here needs more.
+permissions:
+  contents: read
+
+env:
+  BUF_VERSION: '1.72.0'
+  # The versions that produced the committed code: proto/gen/go/bridge/v1/
+  # bridge.pb.go says "protoc-gen-go v1.36.12" in its header; the connect file
+  # carries no version, so this is connectrpc.com/connect in go.mod, which
+  # regenerates it byte for byte. Bump with the code, never alone.
+  PROTOC_GEN_GO_VERSION: 'v1.36.12'
+  PROTOC_GEN_CONNECT_GO_VERSION: 'v1.21.0'
+
+jobs:
+  buf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The PR's merge commit (checkout's default), not its branch tip:
+          # breaking and drift are judged on what would land. fetch-depth 0
+          # for origin/main.
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ env.BUF_VERSION }}
+
+      - name: buf lint
+        working-directory: proto
+        run: buf lint
+
+      # actions/checkout only creates a remote-tracking ref (origin/main), never
+      # a local branch named main, and buf's git input needs `ref=` for it.
+      - name: buf breaking (against main)
+        if: github.event_name == 'pull_request'
+        working-directory: proto
+        run: |
+          set -euo pipefail
+          # A deliberate removal opts out by saying so in a commit message,
+          # rather than by weakening the check for everyone (the convention
+          # agent-fleet's go.yml uses).
+          msgs="$(git log --format='%B' origin/main..HEAD)"
+          if grep -q '^BREAKING CHANGE:' <<<"$msgs"; then
+            echo "::notice::skipping buf breaking: a commit declares BREAKING CHANGE:"
+            exit 0
+          fi
+          if git cat-file -e origin/main:proto 2>/dev/null; then
+            buf breaking --against '../.git#ref=origin/main,subdir=proto'
+          else
+            echo "no proto/ on origin/main yet, nothing to break against"
+          fi
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install the pinned protoc plugins
+        run: |
+          set -euo pipefail
+          go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}"
+          go install "connectrpc.com/connect/cmd/protoc-gen-connect-go@${PROTOC_GEN_CONNECT_GO_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # The generated tree is emptied first, so a file the plugins no longer
+      # write shows up below as a deletion instead of lingering.
+      - name: buf generate
+        run: |
+          set -euo pipefail
+          rm -rf proto/gen
+          (cd proto && buf generate)
+
+      # Fails, never auto-commits (that would need contents: write on a job that
+      # runs the PR's own plugins). `git status --porcelain`, not `git diff`: a
+      # generated file the commit does not have is untracked, and diff is blind
+      # to it.
+      - name: Check for drift
+        run: |
+          set -euo pipefail
+          drift="$(git status --porcelain --untracked-files=all -- proto/gen)"
+          if [ -n "$drift" ]; then
+            echo "::error::Generated files are out of sync with proto/. Regenerate and commit: (cd proto && buf generate)"
+            echo "$drift"
+            git diff --stat -- proto/gen
+            exit 1
+          fi
+          echo "Generated files are up to date"

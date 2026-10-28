@@ -83,6 +83,22 @@ jobs:
           go vet ./...
           go test -race ./...
 
+  # golangci-lint v2.14.0, as agent-fleet's go.yml pins it (the version built
+  # with the go1.27.1 this module declares; a linter built with an older Go
+  # refuses a newer module). Default linters, no config file.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+
   build-push:
     needs: test
     # Registry creds are readable only on push/workflow_dispatch (OIDC claim),

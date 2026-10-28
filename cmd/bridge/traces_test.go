@@ -83,7 +83,7 @@ func TestMainTraces(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	admin.Close(ctx)
+	_ = admin.Close(ctx)
 	u, _ := url.Parse(base)
 	u.Path = "/bridge_main_test"
 
@@ -95,7 +95,7 @@ func TestMainTraces(t *testing.T) {
 		t.Fatal(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
+	_ = ln.Close()
 	addr := "http://" + ln.Addr().String()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestMainTraces$")
@@ -106,10 +106,10 @@ func TestMainTraces(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer cmd.Process.Kill()
+	defer func() { _ = cmd.Process.Kill() }()
 	for i := 0; ; i++ {
 		if r, err := http.Get(addr + "/healthz"); err == nil {
-			r.Body.Close()
+			_ = r.Body.Close()
 			break
 		}
 		if i == 100 {
@@ -123,7 +123,7 @@ func TestMainTraces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r.Body.Close()
+		_ = r.Body.Close()
 	}
 	api := bridgev1connect.NewBridgeServiceClient(http.DefaultClient, addr)
 	if _, err := api.Publish(ctx, connect.NewRequest(&bridgev1.PublishRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
@@ -140,11 +140,11 @@ func TestMainTraces(t *testing.T) {
 	// A webhook whose body never ends: the GitHub handler reads the body before it can check the signature, so it is
 	// in flight when SIGTERM comes, and returns only after srv.Close (the alert handlers refuse before reading).
 	body, feed := io.Pipe()
-	defer feed.Close()
+	defer func() { _ = feed.Close() }()
 	req, _ := http.NewRequest(http.MethodPost, addr+"/webhook/github", body)
 	go func() {
 		if r, err := http.DefaultClient.Do(req); err == nil {
-			r.Body.Close()
+			_ = r.Body.Close()
 		}
 	}()
 	_, _ = feed.Write([]byte("{"))

@@ -103,7 +103,7 @@ func main() {
 		// Subscribe streams never go idle, so Shutdown times out on them; Close
 		// cancels their contexts, or st.Close would wait on their connections.
 		if srv.Shutdown(shutdown) != nil {
-			srv.Close()
+			_ = srv.Close()
 		}
 	}()
 	slog.Info("listening", "port", port)

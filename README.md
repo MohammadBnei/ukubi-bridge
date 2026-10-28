@@ -232,3 +232,31 @@ and `protoc-gen-connect-go` v1.21.0 on `PATH` (the versions agent-fleet uses):
 ```sh
 buf lint && buf generate
 ```
+
+CI (`.github/workflows/proto.yml`) runs `buf lint`, `buf breaking` against
+`main` (a commit saying `BREAKING CHANGE:` opts out) and the same generation
+with those two versions pinned, emptying `proto/gen` first. It fails on any
+`git status --porcelain` output under `proto/gen`: a changed, a missing or an
+untracked generated file. `git diff` alone would not see an untracked one.
+
+## Other checks
+
+- `golangci-lint` v2.14.0 with the default linters, the `lint` job in
+  `app.yml`. An ignored error is written `_ = x.Close()`; a deferred one
+  `defer func() { _ = x.Close() }()`.
+- `.github/workflows/trailers.yml` scans every commit message of a pull request
+  and its title and body (`.github/scripts/check-trailers.py`). An agent's commit may
+  carry `Co-Authored-By: ukubi-claude-<host> <noreply@bnei.dev>` (or
+  `ukubi-agent`) and `Agent-Session: <id>`; a Co-Authored-By naming Claude or
+  Anthropic in any other form, a `Claude-Session:` trailer, a generated-with
+  footer (a line that starts with it or names Claude; prose such as "files
+  generated with protoc-gen-go" passes), a claude.ai or claude.com URL and a
+  model name are refused. So is a commit whose author or committer name or
+  email names Claude or Anthropic (unless it is `ukubi-claude-<host>` or
+  `ukubi-agent` at `noreply@bnei.dev`): GitHub's squash merge turns each commit
+  author into a `Co-authored-by:` trailer on `main`, so set
+  `git config user.name`/`user.email` before committing. A commit with no
+  trailers and a human author passes. The script's own test,
+  `python3 .github/scripts/check_trailers_test.py`, builds a scratch repository
+  with each allowed and each refused form. `--policy none` is the stricter rule
+  mountain uses (no AI trailer at all).
