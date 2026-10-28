@@ -34,6 +34,9 @@ func main() {
 		cerr.log()
 		os.Exit(1)
 	}
+	for _, w := range cfg.Warnings {
+		w.warn()
+	}
 	// API clients are authentik service accounts (infra-bootstrap ADR-0066):
 	// the table holds permissions, the pinned certificate is the trust anchor.
 	if cfg.LegacyClients {
