@@ -835,11 +835,12 @@ func (x *ReplayResponse) GetGap() *Gap {
 	return nil
 }
 
-// ErrorKey rides as a detail on every error a BridgeService call answers
+// ErrorKey rides as a detail on every error a BridgeService handler returns
 // (mountain plan/15 §4): a stable key from the bridge's closed registry
-// (internal/bus/errkeys.go), which a client branches on beside the code, and
-// the source whose words the message holds ("" for the bridge's own, "postgres"
-// for the store's). Messages are for people and may change; keys do not.
+// (internal/bus/errkeys.go, listed in README.md), which a client branches on
+// beside the code, and the source whose words the message holds ("" for the
+// bridge's own, "store" for pgx's or Postgres's). Messages are for people and
+// may change; keys do not.
 type ErrorKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`

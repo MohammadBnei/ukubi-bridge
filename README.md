@@ -152,11 +152,40 @@ Once cleared, the next retention run deletes those events if they are old.
 
 ## Errors
 
-Every BridgeService error carries Connect's code, the same words as before, and an `ErrorKey {key, source}`
-detail (mountain plan/15 §4). A client branches on the code and the key, never on the message. The keys are a
-closed registry in `internal/bus/errkeys.go` (`auth.bearer_required`, `stream.gapped`, `store.unavailable`, …);
-`source` is `postgres` when the message is the store's own words, empty for the bridge's. The webhook endpoints
-answer GitHub, Alertmanager and Grafana in plain text, by status only, as before.
+Every error a BridgeService handler returns carries Connect's code, the same words as before, and an
+`ErrorKey {key, source}` detail (mountain plan/15 §4): a client branches on the code and the key, never on the
+message. `source` is `store` when the message is the store's words (pgx's or Postgres's), empty for the bridge's.
+Errors Connect raises before a handler runs (an unreadable body, an unknown procedure, a client's own timeout) carry
+no key. The registry is closed, in `internal/bus/errkeys.go`:
+
+| Key | Meaning |
+|---|---|
+| `auth.bearer_required` | no `Authorization: Bearer` header |
+| `auth.token_invalid` | the token failed verification (signature, issuer, audience, claims) |
+| `auth.no_key_pinned` | the bridge has no `BRIDGE_OIDC_CERT`: every call is refused (its configuration, not the token) |
+| `auth.token_expired` | the token is past its exp, or a stream reached it: refresh and reconnect |
+| `auth.not_a_client` | a valid token for an account `BRIDGE_API_CLIENTS` does not list |
+| `auth.subscription_not_owned` | the subscription is not the client's name or under it |
+| `stream.token_near_expiry` | too little token left to open a stream |
+| `stream.gapped` | retention deleted events the subscription had not acked: reconnect for the gap, resync, ConfirmGap |
+| `store.unavailable` | the store failed (retry); source `store` |
+| `publish.fields_required` | id, type and subject are required |
+| `publish.type_denied` | the client may not publish that type |
+| `publish.subject_denied` | the client may not publish on that subject |
+| `publish.hops_out_of_range` | hops is negative or at the int32 maximum |
+| `publish.data_not_json` | data is not JSON |
+| `publish.actor_unknown` | a privileged publish named an unknown actor |
+| `publish.refused` | the store refused the event's values (retrying cannot help); source `store` |
+| `subscribe.filter_denied` | the filter is wider than the client's subscribe rules |
+| `delivery.not_in_flight` | Ack or Nack of an event not in flight on that subscription |
+| `gap.version_invalid` | ConfirmGap's version is not positive |
+| `gap.version_unsent` | ConfirmGap of a version no stream sent |
+| `gap.version_stale` | ConfirmGap of a version since widened: reconnect for the new one |
+| `replay.no_subscription` | Replay of a subscription that does not exist |
+| `replay.filter_revoked` | Replay of a subscription whose filter the client may no longer read |
+| `server.internal` | an error a handler returned without its own key (a failed send): its code and words kept |
+
+The webhook endpoints answer GitHub, Alertmanager and Grafana in plain text, by status only, as before.
 
 ## Configuration
 

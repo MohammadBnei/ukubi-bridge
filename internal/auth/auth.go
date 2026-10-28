@@ -29,6 +29,9 @@ const skew = time.Minute
 // ErrNoKey: no certificate is pinned yet, so every token is refused.
 var ErrNoKey = errors.New("no signing certificate pinned (BRIDGE_OIDC_CERT)")
 
+// ErrExpired is a token past its exp: the client refreshes it.
+var ErrExpired = errors.New("token: expired")
+
 // Verifier checks tokens against pinned keys. The keys are the trust anchor:
 // a JWKS fetched over the pod network could be spoofed, so Watch only compares.
 type Verifier struct {
@@ -114,7 +117,7 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 	case c.Expiry == nil:
 		return "", time.Time{}, errors.New("token: no exp")
 	case !c.Expiry.Time().After(now):
-		return "", time.Time{}, errors.New("token: expired")
+		return "", time.Time{}, ErrExpired
 	case c.NotBefore != nil && c.NotBefore.Time().After(now.Add(skew)):
 		return "", time.Time{}, errors.New("token: not valid yet")
 	case c.IssuedAt != nil && c.IssuedAt.Time().After(now.Add(skew)):

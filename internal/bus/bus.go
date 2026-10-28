@@ -202,7 +202,9 @@ func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
 }
 
 // Handler mounts the service on a mux.
-func (s *Server) Handler() (string, http.Handler) { return bridgev1connect.NewBridgeServiceHandler(s) }
+func (s *Server) Handler() (string, http.Handler) {
+	return bridgev1connect.NewBridgeServiceHandler(s, connect.WithInterceptors(keyAll{}))
+}
 
 // errGapped ends a stream whose subscription a deletion run gapped (events it
 // had not acked are gone); errReplaced one a reconnect on the same name took over.
@@ -223,7 +225,7 @@ func (s *Server) auth(h http.Header) (Client, time.Time, error) {
 	}
 	sub, exp, err := s.tokens.Verify(tok)
 	if err != nil {
-		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyToken, err)
+		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, tokenKey(err), err)
 	}
 	c, ok := s.clients[sub]
 	if !ok {
@@ -277,7 +279,7 @@ func unavailable(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ended(ctx) // the bridge or the client ended the stream; not an outage
 	}
-	return sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+	return sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 }
 
 func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
@@ -330,10 +332,10 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	}
 	inserted, err := s.st.Insert(ctx, e)
 	if store.Invalid(err) {
-		return nil, sourced(connect.CodeInvalidArgument, keyRefused, sourcePostgres, err) // retrying cannot help
+		return nil, sourced(connect.CodeInvalidArgument, keyRefused, sourceStore, err) // retrying cannot help
 	}
 	if err != nil {
-		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
 	return connect.NewResponse(&bridgev1.PublishResponse{Duplicate: !inserted}), nil
 }
@@ -496,7 +498,7 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	}
 	if err := s.st.Ack(ctx, sub, seq); err != nil {
 		st.done <- outcome{} // redeliver; subscribers are idempotent on (source, id)
-		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.AckResponse{}), nil
@@ -523,7 +525,7 @@ func (s *Server) ConfirmGap(ctx context.Context, req *connect.Request[bridgev1.C
 	}
 	current, err := s.st.ClearGap(ctx, sub, v)
 	if err != nil {
-		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
 	if !current {
 		return nil, keyed(connect.CodeFailedPrecondition, keyGapStale, fmt.Errorf("gap version %d of %q is not current: reconnect", v, sub))
@@ -546,7 +548,7 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 	n, err := s.st.Fail(ctx, sub)
 	if err != nil {
 		st.done <- outcome{delay: RetryBase}
-		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
 	if n < MaxAttempts {
 		st.done <- outcome{delay: RetryBase << (n - 1)}
@@ -563,7 +565,7 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 	}
 	if err := s.st.DeadLetter(ctx, sub, e, fmt.Sprintf("%d attempts: %s", n, reason)); err != nil {
 		st.done <- outcome{delay: RetryBase}
-		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.NackResponse{}), nil
