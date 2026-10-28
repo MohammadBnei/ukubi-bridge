@@ -21,6 +21,9 @@ import (
 )
 
 func main() {
+	// JSON on stdout (mountain plan/15 §7): Loki's detected_level reads the level field; the chart's two alerts match
+	// the words, which JSON leaves as they are (TestAlertLines).
+	slog.SetDefault(newLogger(os.Stdout))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
@@ -78,7 +81,8 @@ func main() {
 	port := cfg.Port
 	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
 	// alongside Connect and gRPC-Web.
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols)}
+	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols),
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)} // net/http's own lines, WARN
 	srv.Protocols.SetHTTP1(true)
 	srv.Protocols.SetUnencryptedHTTP2(true)
 	shutdownDone := make(chan struct{})
@@ -201,3 +205,6 @@ func reconciler(st *store.Store, app *AppConfig) *github.Reconciler {
 	return &github.Reconciler{API: "https://api.github.com", AppID: app.ID, Key: app.Key, Lookback: app.Lookback,
 		Known: st.Known, Client: &http.Client{Timeout: 30 * time.Second}}
 }
+
+// newLogger is the bridge's log: one JSON object per line (time, level, msg, attributes) on w.
+func newLogger(w io.Writer) *slog.Logger { return slog.New(slog.NewJSONHandler(w, nil)) }
