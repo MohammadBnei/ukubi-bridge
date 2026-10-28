@@ -12,9 +12,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	bridgev1 "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1"
@@ -343,5 +345,68 @@ func TestKeyAllWraps(t *testing.T) {
 	}
 	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, connect.WithInterceptors(append(ics[:len(ics):len(ics)], keyAll{})...))") {
 		t.Error("Handler does not install keyAll last, inside the caller's interceptors")
+	}
+}
+
+// TestContextCodes: a plain context error keeps the code Connect sends for it unkeyed (its toWire, wrapIfContextError),
+// wrapped or not; any other plain error is Unknown. Each leaves keyed internal, with its words.
+func TestContextCodes(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code connect.Code
+		name string
+	}{
+		{context.Canceled, connect.CodeCanceled, "canceled"},
+		{context.DeadlineExceeded, connect.CodeDeadlineExceeded, "deadline"},
+		{fmt.Errorf("query: %w", context.DeadlineExceeded), connect.CodeDeadlineExceeded, "wrapped deadline"},
+		{fmt.Errorf("send: %w", context.Canceled), connect.CodeCanceled, "wrapped canceled"},
+		{os.ErrDeadlineExceeded, connect.CodeDeadlineExceeded, "os deadline"},
+		{errors.New("broken pipe"), connect.CodeUnknown, "plain"},
+	} {
+		got := withKey(c.err)
+		if k, _, ok := keyOf(got); !ok || k != "server.internal" || connect.CodeOf(got) != c.code || !strings.Contains(got.Error(), c.err.Error()) {
+			t.Errorf("%s: %v code %v key %q", c.name, got, connect.CodeOf(got), k)
+		}
+	}
+}
+
+// TestSentinelUnchanged: keying never changes the handler's error, which may be a shared sentinel: concurrent requests
+// do not race on it (run with -race), and it stays unkeyed with what it had, while the copy carries that, then the key.
+// Both forms run: one with meta and a detail, and one with neither, whose Meta() would create the map on first read.
+func TestSentinelUnchanged(t *testing.T) {
+	why, err := connect.NewErrorDetail(wrapperspb.String("gone"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := connect.NewError(connect.CodeNotFound, errors.New("no such subscription"))
+	full.Meta().Set("X-Why", "gone")
+	full.AddDetail(why)
+	for _, c := range []struct {
+		name     string
+		sentinel *connect.Error
+		details  int // the sentinel's own
+		meta     string
+	}{
+		{"with meta and detail", full, 1, "gone"},
+		{"bare", connect.NewError(connect.CodeNotFound, errors.New("no such subscription")), 0, ""},
+	} {
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got := withKey(c.sentinel)
+				var ce *connect.Error
+				if k, _, ok := keyOf(got); !ok || k != "server.internal" || !errors.As(got, &ce) || ce.Code() != connect.CodeNotFound ||
+					ce.Message() != "no such subscription" || ce.Meta().Get("X-Why") != c.meta || len(ce.Details()) != c.details+1 ||
+					(c.details > 0 && ce.Details()[0].Type() != why.Type()) {
+					t.Errorf("%s: keyed: %v", c.name, got)
+				}
+			}()
+		}
+		wg.Wait()
+		if _, _, ok := keyOf(c.sentinel); ok || len(c.sentinel.Details()) != c.details || c.sentinel.Meta().Get("X-Why") != c.meta {
+			t.Errorf("%s: the sentinel was changed: %d details", c.name, len(c.sentinel.Details()))
+		}
 	}
 }
