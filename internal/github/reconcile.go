@@ -105,7 +105,7 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("%w: %s %s: %d, retry-after %q, reset %q", ErrRateLimited, method, url,
 				resp.StatusCode, resp.Header.Get("Retry-After"), resp.Header.Get("X-RateLimit-Reset"))
 		}
@@ -124,7 +124,7 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 		}
 		var page []delivery
 		err = json.NewDecoder(resp.Body).Decode(&page)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK || err != nil {
 			return 0, fmt.Errorf("list deliveries: status %d: %v", resp.StatusCode, err)
 		}
@@ -168,8 +168,8 @@ func (r *Reconciler) Run(ctx context.Context, now time.Time) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusAccepted {
 			slog.Warn("reconcile: redeliver refused", "guid", guid, "id", latest.ID, "status", resp.StatusCode)
 			continue

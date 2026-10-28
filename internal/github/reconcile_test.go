@@ -78,12 +78,12 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.lists++
 		page := 0
 		if c := r.URL.Query().Get("cursor"); c != "" {
-			fmt.Sscan(c, &page)
+			_, _ = fmt.Sscan(c, &page)
 		}
 		if page+1 < len(f.pages) {
 			w.Header().Set("Link", fmt.Sprintf(`<http://%s/app/hook/deliveries?per_page=100&cursor=%d>; rel="next"`, r.Host, page+1))
 		}
-		json.NewEncoder(w).Encode(f.pages[page])
+		_ = json.NewEncoder(w).Encode(f.pages[page])
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/attempts"):
 		f.mu.Lock()
 		f.posted = append(f.posted, r.URL.Path)

@@ -47,7 +47,7 @@ func TestNone(t *testing.T) {
 	if err != nil || tr.tp == nil || len(tr.Interceptors()) != 1 {
 		t.Errorf("an endpoint: %v", err) // the positive control: an endpoint makes a tracer
 	}
-	tr.Shutdown()
+	_ = tr.Shutdown()
 }
 
 // check: one server span named name, linked to the caller's trace and not a child of it, for service ukubi-bridge.

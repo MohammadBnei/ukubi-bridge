@@ -152,8 +152,8 @@ func fmtArgs(args []any) string {
 func TestConfigDocumented(t *testing.T) {
 	read := map[string]bool{}
 	all := map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_GITHUB_APP_ID": "1", "BRIDGE_GITHUB_APP_PRIVATE_KEY": keyPEM(t)}
-	load(func(k string) string { read[k] = true; return "" })
-	load(func(k string) string { read[k] = true; return all[k] })
+	_, _ = load(func(k string) string { read[k] = true; return "" })
+	_, _ = load(func(k string) string { read[k] = true; return all[k] })
 	listed := map[string]bool{}
 	for _, v := range envVars {
 		listed[v] = true
