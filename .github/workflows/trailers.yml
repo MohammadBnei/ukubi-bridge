@@ -2,7 +2,8 @@
 # "Co-Authored-By: ukubi-claude-<host> <noreply@bnei.dev>" or "ukubi-agent",
 # "Agent-Session: <id>", and none of a Claude/Anthropic co-author, a generated-with
 # footer, a claude.ai or claude.com URL, a Claude-Session trailer or a model
-# name. The rules, and the policy mountain uses instead, are in
+# name, and no commit author or committer naming Claude or Anthropic (a squash
+# merge turns each author into a Co-authored-by trailer). The rules, and the policy mountain uses instead, are in
 # .github/scripts/check-trailers.py.
 name: trailers
 

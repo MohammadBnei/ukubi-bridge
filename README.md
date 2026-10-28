@@ -249,8 +249,14 @@ untracked generated file. `git diff` alone would not see an untracked one.
   carry `Co-Authored-By: ukubi-claude-<host> <noreply@bnei.dev>` (or
   `ukubi-agent`) and `Agent-Session: <id>`; a Co-Authored-By naming Claude or
   Anthropic in any other form, a `Claude-Session:` trailer, a generated-with
-  footer, a claude.ai or claude.com URL and a model name are refused. A commit
-  with no trailers passes. The script's own test,
+  footer (a line that starts with it or names Claude; prose such as "files
+  generated with protoc-gen-go" passes), a claude.ai or claude.com URL and a
+  model name are refused. So is a commit whose author or committer name or
+  email names Claude or Anthropic (unless it is `ukubi-claude-<host>` or
+  `ukubi-agent` at `noreply@bnei.dev`): GitHub's squash merge turns each commit
+  author into a `Co-authored-by:` trailer on `main`, so set
+  `git config user.name`/`user.email` before committing. A commit with no
+  trailers and a human author passes. The script's own test,
   `python3 .github/scripts/check_trailers_test.py`, builds a scratch repository
   with each allowed and each refused form. `--policy none` is the stricter rule
   mountain uses (no AI trailer at all).

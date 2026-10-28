@@ -53,6 +53,21 @@ CASES = [
     ("model Sonnet 4", "feat: x\n\nSonnet 4 did it", {"agent": "model name", "none": "model name"}),
     ("model Claude Sonnet 5.5", "feat: x\n\nClaude Sonnet 5.5", {"agent": "model name", "none": "model name"}),
     ("model Haiku 4.5", "feat: x\n\nhaiku-4.5", {"agent": "model name", "none": "model name"}),
+    # model names with a no-break space or an underscore as the separator
+    ("model Opus 5 with a no-break space", "feat: x\n\nwritten by Opus\u00a05", {"agent": "model name", "none": "model name"}),
+    ("model claude_opus_5", "feat: x\n\nclaude_opus_5", {"agent": "model name", "none": "model name"}),
+    ("model claude, no-break space, sonnet", "feat: x\n\nclaude\u00a0sonnet", {"agent": "model name", "none": "model name"}),
+    # a forbidden line hidden behind another line break: a bare CR, U+2028, a vertical tab, U+0085
+    ("hidden behind a bare CR", "feat: x\n\nok\rCo-Authored-By: Claude <noreply@anthropic.com>", {"agent": "names Claude", "none": "Co-Authored-By"}),
+    ("hidden behind U+2028", "feat: x\n\nok\u2028Co-Authored-By: Claude <noreply@anthropic.com>", {"agent": "names Claude", "none": "Co-Authored-By"}),
+    ("hidden behind a vertical tab", "feat: x\n\nok\x0bClaude-Session: x", {"agent": "Claude-Session", "none": "Claude-Session"}),
+    ("hidden behind U+0085", "feat: x\n\nok\x85Claude-Session: x", {"agent": "Claude-Session", "none": "Claude-Session"}),
+    # "generated with" is refused as a footer, not as prose
+    ("prose about generated code", "chore: regenerate\n\nfiles generated with protoc-gen-go v1.36.12", {"agent": None, "none": None}),
+    ("prose, generated with buf", "chore: regenerate\n\nThe stubs are generated with buf generate.", {"agent": None, "none": None}),
+    ("footer naming Claude Code after text", "feat: x\n\nDone. Generated with Claude Code", {"agent": "generated-with", "none": "generated-with"}),
+    ("footer with a link", "feat: x\n\nGenerated with [Claude Code](https://example.org)", {"agent": "generated-with", "none": "generated-with"}),
+    ("footer in italics", "feat: x\n\n_Generated with a tool_", {"agent": "generated-with", "none": "generated-with"}),
     # the subject line is scanned too
     ("subject", "feat: add Opus 5 support", {"agent": "model name", "none": "model name"}),
 ]
@@ -61,6 +76,7 @@ CASES = [
 def git(cwd, *args, env=None):
     e = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.org", GIT_COMMITTER_NAME="t",
              GIT_COMMITTER_EMAIL="t@example.org", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+    e.pop("GIT_DIR", None)
     if env:
         e.update(env)
     return subprocess.run(["git", *args], cwd=cwd, env=e, check=True, stdout=subprocess.PIPE,
@@ -139,6 +155,82 @@ class Trailers(unittest.TestCase):
                     else:
                         self.assertEqual(rc, 0, out)
 
+    def author_commit(self, name, email, committer=None):
+        """One commit on top of base with a clean message and the given author."""
+        env = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email}
+        if committer:
+            env.update(GIT_COMMITTER_NAME=committer[0], GIT_COMMITTER_EMAIL=committer[1])
+        git(self.repo, "checkout", "-q", "--detach", self.base)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "feat: x\n\n%s\n%s" % (CLOUD, SESSION), env=env)
+        sha = git(self.repo, "rev-parse", "HEAD")
+        return sha, "%s..%s" % (self.base, sha)
+
+    def test_author_identity(self):
+        # GitHub's squash merge turns each distinct commit author into a Co-authored-by
+        # trailer, so the identity is checked as well as the message (policy agent).
+        for name, email, rc_want in [
+            ("Claude", "noreply@anthropic.com", 1),
+            ("Claude", "noreply@bnei.dev", 1),
+            ("t", "noreply@anthropic.com", 1),
+            ("Anthropic Bot", "bot@example.org", 1),
+            ("ukubi-claude-cloud", "noreply@anthropic.com", 1),
+            ("ukubi-claude-cloud", "noreply@bnei.dev", 0),
+            ("ukubi-agent", "noreply@bnei.dev", 0),
+            ("Jane Doe", "jane@example.org", 0),
+        ]:
+            sha, rng = self.author_commit(name, email)
+            with self.subTest(author=name, email=email):
+                rc, out = run(self.repo, "agent", rng=rng)
+                self.assertEqual(rc, rc_want, out)
+                if rc_want:
+                    self.assertIn("identity", out)
+                    self.assertIn(sha[:12], out)
+                    self.assertIn(name, out)
+
+    def test_author_identity_under_none(self):
+        # no AI trailer at all: even an allowed agent identity is refused, a human passes
+        for name, email, rc_want in [
+            ("ukubi-claude-cloud", "noreply@bnei.dev", 1),
+            ("Claude", "noreply@anthropic.com", 1),
+            ("Jane Doe", "jane@example.org", 0),
+        ]:
+            git(self.repo, "checkout", "-q", "--detach", self.base)
+            git(self.repo, "commit", "-q", "--allow-empty", "-m", "feat: x",
+                env={"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email})
+            sha = git(self.repo, "rev-parse", "HEAD")
+            with self.subTest(author=name):
+                rc, out = run(self.repo, "none", rng="%s..%s" % (self.base, sha))
+                self.assertEqual(rc, rc_want, out)
+                if rc_want:
+                    self.assertIn("identity", out)
+
+    def test_committer_identity(self):
+        sha, rng = self.author_commit("Jane Doe", "jane@example.org", committer=("Claude", "noreply@anthropic.com"))
+        rc, out = run(self.repo, "agent", rng=rng)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("identity", out)
+        sha, rng = self.author_commit("Jane Doe", "jane@example.org", committer=("GitHub", "noreply@github.com"))
+        rc, out = run(self.repo, "agent", rng=rng)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_record_separator_in_a_message_hides_nothing(self):
+        # \x1e used to split one commit into two records; the second was never scanned
+        git(self.repo, "checkout", "-q", "--detach", self.base)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m",
+            "feat: x\n\nsome text\x1e\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+        sha = git(self.repo, "rev-parse", "HEAD")
+        rc, out = run(self.repo, "agent", rng="%s..%s" % (self.base, sha))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("names Claude", out)
+        self.assertIn(sha[:12], out)
+        # and a clean message with a \x1e is one clean message, not two
+        git(self.repo, "checkout", "-q", "--detach", self.base)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "feat: y\n\na\x1eb\x00c".replace("\x00", ""))
+        sha = git(self.repo, "rev-parse", "HEAD")
+        rc, out = run(self.repo, "agent", rng="%s..%s" % (self.base, sha))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 message(s) clean", out)
+
     def test_offending_commit_is_named_among_clean_ones(self):
         git(self.repo, "checkout", "-q", "--detach", self.base)
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "feat: one\n\n%s\n%s" % (CLOUD, SESSION))
@@ -182,6 +274,15 @@ class Trailers(unittest.TestCase):
         rc, out = run(self.repo, "agent", body="Generated with x\r::error::boom")
         self.assertEqual(rc, 1, out)
         self.assertNotIn("\r", out)
+
+    def test_hidden_trailers_in_the_pr_text(self):
+        for body in ("ok\rCo-Authored-By: Claude <noreply@anthropic.com>",
+                     "ok\u2028Co-Authored-By: Claude <noreply@anthropic.com>",
+                     "ok\x0bClaude-Session: x"):
+            with self.subTest(body=body):
+                rc, out = run(self.repo, "agent", body=body)
+                self.assertEqual(rc, 1, out)
+                self.assertNotIn("\r", out)
 
     def test_title_and_body_together_and_crlf(self):
         rc, out = run(self.repo, "agent", title="feat: fine", body="line\r\nGenerated with x\r\n")
