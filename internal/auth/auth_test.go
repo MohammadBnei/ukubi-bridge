@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -159,5 +160,30 @@ func TestCompare(t *testing.T) {
 	publish = &other.PublicKey
 	if err := v.compare(context.Background(), srv.URL, srv.Client()); err == nil {
 		t.Fatal("a rotation went unnoticed")
+	}
+}
+
+// TestVerifyExpired: a token at or past its exp is ErrExpired (the client refreshes it); no other refusal is.
+func TestVerifyExpired(t *testing.T) {
+	k := key(t)
+	v, err := New(iss, aud, certPEM(t, k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	v.now = func() time.Time { return now }
+	mod := func(f func(*tokenClaims)) tokenClaims { c := good(now); f(&c); return c }
+	for name, c := range map[string]struct {
+		claims  tokenClaims
+		expired bool
+	}{
+		"expired":   {mod(func(c *tokenClaims) { c.Expiry = jwt.NewNumericDate(now.Add(-time.Second)) }), true},
+		"exp now":   {mod(func(c *tokenClaims) { c.Expiry = jwt.NewNumericDate(now) }), true},
+		"nbf ahead": {mod(func(c *tokenClaims) { c.NotBefore = jwt.NewNumericDate(now.Add(2 * time.Minute)) }), false},
+		"no sub":    {mod(func(c *tokenClaims) { c.Subject = "" }), false},
+	} {
+		if _, _, err := v.Verify(sign(t, jose.RS256, k, c.claims)); errors.Is(err, ErrExpired) != c.expired {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
