@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"maps"
 	"os"
@@ -327,5 +328,56 @@ func TestEnvUses(t *testing.T) {
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: %v, want %v", c.src, got, c.want)
 		}
+	}
+}
+
+// TestConfigTraces: the traces endpoint is an http(s) URL with its path, or unset (no tracing).
+func TestConfigTraces(t *testing.T) {
+	for v, ok := range map[string]bool{"": true, "http://alloy.monitoring:4318/v1/traces": true, "https://x/v1/traces": true,
+		"nope": false, "http://alloy:4318": false, "http://alloy:4318/": false, "grpc://alloy:4317/v1/traces": false} {
+		c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": v}))
+		if (err == nil) != ok || (ok && c.Traces != v) {
+			t.Errorf("%q: %v %q", v, err, c.Traces)
+		}
+		if err != nil && (err.msg != "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)" || fmtArgs(err.args) != "[value "+v+"]") {
+			t.Errorf("%q: %q %s", v, err.msg, fmtArgs(err.args))
+		}
+	}
+}
+
+// TestConfigTracesRedacted: a refused endpoint is logged without its password.
+func TestConfigTracesRedacted(t *testing.T) {
+	_, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://u:hunter2@alloy:4318"}))
+	if err == nil || fmtArgs(err.args) != "[value http://u:xxxxx@alloy:4318]" {
+		t.Errorf("%v", err)
+	}
+}
+
+// TestTracedWiring: main registers on its mux only through route (which traces), plus /healthz and the API (whose
+// interceptors trace it; TestMainTraces runs them all). A route added with mux.Handle or mux.HandleFunc fails here.
+func TestTracedWiring(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, isID := sel.X.(*ast.Ident); !isID || id.Name != "mux" {
+			return true
+		}
+		got = append(got, sel.Sel.Name+"("+types.ExprString(c.Args[0])+")")
+		return true
+	})
+	want := `HandleFunc("GET /healthz") Handle(pattern) Handle(api.Handler(tel.Interceptors()...))`
+	if strings.Join(got, " ") != want {
+		t.Errorf("main.go's mux calls: %s, want %s (a traced route goes through route)", strings.Join(got, " "), want)
 	}
 }

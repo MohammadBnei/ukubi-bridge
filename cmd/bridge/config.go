@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ var envVars = []string{
 	"BRIDGE_DATABASE_URL", "BRIDGE_GITHUB_WEBHOOK_SECRET", "BRIDGE_TRUSTED_LOGINS", "BRIDGE_AGENT_LOGINS",
 	"BRIDGE_API_CLIENTS", "BRIDGE_OIDC_ISSUER", "BRIDGE_OIDC_CLIENT_ID", "BRIDGE_OIDC_CERT", "BRIDGE_OIDC_JWKS_URL",
 	"BRIDGE_GITHUB_APP_ID", "BRIDGE_GITHUB_APP_PRIVATE_KEY", "BRIDGE_RECONCILE_LOOKBACK", "BRIDGE_ALERT_TOKEN",
-	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS",
+	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
@@ -32,6 +33,7 @@ type Config struct {
 	AlertToken      string // "": both alert endpoints answer 503
 	Retention       time.Duration
 	Port            string
+	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
 	App             *AppConfig // nil: the reconcile loop is off (no App id or no key)
 }
 
@@ -57,7 +59,8 @@ func (e *configError) Error() string { return e.msg }
 func (e *configError) log() { slog.Error(e.msg, e.args...) }
 
 // load reads the configuration from getenv. A refusal is the first problem, in the order the settings were checked
-// before the Config existed: the webhook secret, the retention, the App's key, the lookback.
+// before the Config existed (the webhook secret, the retention, the App's key, the lookback), the traces endpoint
+// after the retention.
 func load(getenv func(string) string) (Config, *configError) {
 	c := Config{
 		WebhookSecret: getenv("BRIDGE_GITHUB_WEBHOOK_SECRET"),
@@ -84,6 +87,15 @@ func load(getenv func(string) string) (Config, *configError) {
 	}
 	if c.Port == "" {
 		c.Port = "8080"
+	}
+	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
+		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {
+			shown := "(not a URL)"
+			if err == nil {
+				shown = u.Redacted() // a user:pass in it is never logged
+			}
+			return Config{}, &configError{msg: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)", args: []any{"value", shown}}
+		}
 	}
 	appID, pemKey := getenv("BRIDGE_GITHUB_APP_ID"), getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
 	if appID == "" || pemKey == "" {
