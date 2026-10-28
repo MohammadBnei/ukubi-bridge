@@ -37,7 +37,8 @@ type Config struct {
 	App             *AppConfig // nil: the reconcile loop is off (no App id or no key, or a key that does not parse)
 	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
 	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
-	// each at WARN. Only a missing required setting refuses the start (the webhook secret).
+	// each at WARN. load's one refusal is a missing webhook secret; the settings only a constructor can check (the
+	// client table, the pinned certificate, the database URL) still refuse in main, closed.
 	Warnings []*configError
 }
 
@@ -66,8 +67,8 @@ func (e *configError) log() { slog.Error(e.msg, e.args...) }
 // warn writes the warning's line.
 func (e *configError) warn() { slog.Warn(e.msg, e.args...) }
 
-// load reads the configuration from getenv. The one refusal is a missing webhook secret: the bridge cannot do its
-// job without it. Every other setting is optional, and a value that does not satisfy its rule is a warning
+// load reads the configuration from getenv. Its one refusal is a missing webhook secret: the bridge cannot do its
+// job without it (main still refuses what only a constructor can check: see Config). Every other setting is optional, and a value that does not satisfy its rule is a warning
 // (Config.Warnings) and its default, in the order the settings are checked: the retention, the traces endpoint, the
 // App's key, the lookback.
 func load(getenv func(string) string) (Config, *configError) {
@@ -101,8 +102,11 @@ func load(getenv func(string) string) (Config, *configError) {
 	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
 		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {
 			shown := "(not a URL)"
-			if err == nil {
-				shown = u.Redacted() // a user:pass in it is never logged
+			switch {
+			case strings.Contains(c.Traces, "@"): // any user:password form, parsed or not, scheme or not, is never logged
+				shown = "<redacted: contains @>"
+			case err == nil:
+				shown = u.String()
 			}
 			c.warn("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces); tracing is off", "value", shown)
 			c.Traces = ""
@@ -121,6 +125,8 @@ func load(getenv func(string) string) (Config, *configError) {
 	if v := getenv("BRIDGE_RECONCILE_LOOKBACK"); v != "" {
 		if d, err := time.ParseDuration(v); err != nil {
 			c.warn("BRIDGE_RECONCILE_LOOKBACK is not a Go duration; using the default", "err", err, "default", app.Lookback.String())
+		} else if d <= 0 {
+			c.warn("BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default", "value", v, "default", app.Lookback.String())
 		} else {
 			app.Lookback = d
 		}

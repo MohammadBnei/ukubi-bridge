@@ -133,6 +133,10 @@ func TestConfigWarnings(t *testing.T) {
 			func(c Config) bool { return c.App == nil }},
 		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, []string{lookback + ` [err time: invalid duration "nope" default 6h0m0s]`},
 			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
+		{"zero lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "0s"}, []string{"BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default [value 0s default 6h0m0s]"},
+			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
+		{"negative lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "-1h"}, []string{"BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default [value -1h default 6h0m0s]"},
+			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
 		{"retention before key", map[string]string{"BRIDGE_RETENTION": "nope", "BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"},
 			[]string{retention + " [value nope default 720h0m0s]", badKey + " [err no PEM block in private key]"},
 			func(c Config) bool { return c.Retention == 720*time.Hour && c.App == nil }},
@@ -385,11 +389,15 @@ func TestConfigTraces(t *testing.T) {
 	}
 }
 
-// TestConfigTracesRedacted: a bad endpoint is logged without its password.
+// TestConfigTracesRedacted: a bad endpoint is logged without its password, in any form: parsed, unparsable, or with
+// no scheme.
 func TestConfigTracesRedacted(t *testing.T) {
-	c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://u:hunter2@alloy:4318"}))
-	if err != nil || len(c.Warnings) != 1 || fmtArgs(c.Warnings[0].args) != "[value http://u:xxxxx@alloy:4318]" {
-		t.Errorf("%v %v", err, c.Warnings)
+	for _, v := range []string{"http://u:hunter2@alloy:4318", "http://u:hunter2@c/v1/traces\n", "http://u:hunter2@c:abc/v1/traces",
+		"http://u:hunter2@[::1/v1/traces", " http://u:hunter2@c/v1/traces", "u:hunter2@c:4318"} {
+		c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": v}))
+		if err != nil || len(c.Warnings) != 1 || fmtArgs(c.Warnings[0].args) != "[value <redacted: contains @>]" {
+			t.Errorf("%q: %v %v", v, err, c.Warnings)
+		}
 	}
 }
 

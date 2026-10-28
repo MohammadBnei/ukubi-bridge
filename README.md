@@ -190,10 +190,11 @@ The webhook endpoints answer GitHub, Alertmanager and Grafana in plain text, by 
 
 ## Configuration
 
-The webhook secret is the one required setting: without it the bridge refuses to start (an ERROR line, exit 1).
-Every other setting is optional. One that is set and does not satisfy its rule is logged at WARN, naming the
-variable and the rule, and takes its default: the retention or lookback default, no tracing, or no reconcile loop
-for a private key that does not parse.
+The bridge refuses to start (an ERROR line, exit 1) without its webhook secret, on a database URL it cannot open,
+and, closed rather than open, on a `BRIDGE_API_CLIENTS` table or an OIDC certificate, issuer or client id that does
+not parse. The other settings are optional: one that is set and does not satisfy its rule is logged at WARN, naming
+the variable and the rule, and takes its default (the retention or lookback default, no tracing, or no reconcile
+loop for a private key that does not parse).
 
 | Env | Meaning |
 |---|---|
