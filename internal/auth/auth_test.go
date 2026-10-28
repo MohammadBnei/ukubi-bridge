@@ -151,7 +151,7 @@ func TestCompare(t *testing.T) {
 	v, _ := New(iss, aud, certPEM(t, pinned))
 	publish := &pinned.PublicKey
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: publish, Algorithm: "RS256", Use: "sig"}}})
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: publish, Algorithm: "RS256", Use: "sig"}}})
 	}))
 	defer srv.Close()
 	if err := v.compare(context.Background(), srv.URL, srv.Client()); err != nil {

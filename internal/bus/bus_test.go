@@ -62,7 +62,7 @@ func setup(t *testing.T) fixture {
 			t.Fatal(err)
 		}
 	}
-	admin.Close(ctx)
+	_ = admin.Close(ctx)
 	u, _ := url.Parse(base)
 	u.Path = "/bridge_bus_test"
 
@@ -75,7 +75,7 @@ func setup(t *testing.T) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close(ctx) })
+	t.Cleanup(func() { _ = db.Close(ctx) })
 
 	clients, err := ParseClients(`{
 		"bridge-core": {"kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "privileged": true,
@@ -286,8 +286,8 @@ func TestReplay(t *testing.T) {
 	// The log and the cursor are untouched, and r2 is still the one in flight.
 	var replayedRows int
 	var cursor int64
-	f.db.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE replayed`).Scan(&replayedRows)
-	f.db.QueryRow(context.Background(), `SELECT last_acked_id FROM subscriptions WHERE name = 'bridge-core/replay'`).Scan(&cursor)
+	_ = f.db.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE replayed`).Scan(&replayedRows)
+	_ = f.db.QueryRow(context.Background(), `SELECT last_acked_id FROM subscriptions WHERE name = 'bridge-core/replay'`).Scan(&cursor)
 	if replayedRows != 0 || cursor != first.Seq {
 		t.Fatalf("replay mutated state: %d replayed rows, cursor %d (want 0, %d)", replayedRows, cursor, first.Seq)
 	}
@@ -386,7 +386,7 @@ func TestReadRules(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 		stream.Receive() // the first read surfaces a refusal sent before any message
 		return stream.Err()
 	}
@@ -496,7 +496,7 @@ func TestRetentionGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer again.Close()
+	defer func() { _ = again.Close() }()
 	if !again.Receive() {
 		t.Fatal(again.Err())
 	}
@@ -563,7 +563,7 @@ func TestMovedAndReplacedStreams(t *testing.T) {
 	}
 	quietDone := open("bridge-core/quiet")
 	f.publish(t, "core-token", ev("m1", "app/x")) // dev.app.test: the quiet subscription does not match it
-	f.db.Exec(ctx, `UPDATE events SET ingested_at = now() - interval '40 days'`)
+	_, _ = f.db.Exec(ctx, `UPDATE events SET ingested_at = now() - interval '40 days'`)
 	p, err := f.srv.Prune(ctx, time.Now().Add(-30*24*time.Hour))
 	if err != nil || len(p.Moved) != 1 || len(p.Gapped) != 0 {
 		t.Fatalf("prune %+v %v", p, err)

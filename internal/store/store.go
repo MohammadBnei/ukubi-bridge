@@ -106,7 +106,7 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(insertLock)); err != nil {
 		return false, err
 	}
@@ -257,7 +257,7 @@ func (s *Store) DeadLetter(ctx context.Context, name string, e event.Event, reas
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Only while the event still exists: a deletion run that removed it first
 	// already counted it in this subscription's gap, and a dead letter for a
 	// deleted event would park its subject for nothing.
@@ -308,7 +308,7 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (Pruned, error) {
 	if err != nil {
 		return p, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	// Lock order: dead_letters, retention, then every subscription by name
 	// (DeadLetter takes dead_letters then its subscription; Ack only its
 	// subscription), so nothing deadlocks. The table lock makes every

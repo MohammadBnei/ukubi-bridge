@@ -156,7 +156,7 @@ func (v *Verifier) compare(ctx context.Context, url string, client *http.Client)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", res.StatusCode)
 	}

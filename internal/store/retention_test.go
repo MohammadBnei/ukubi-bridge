@@ -101,7 +101,7 @@ func TestPrune(t *testing.T) {
 	var kept []string
 	for rows.Next() {
 		var id string
-		rows.Scan(&id)
+		_ = rows.Scan(&id)
 		kept = append(kept, id)
 	}
 	if fmt.Sprint(kept) != "[old3 old5 new]" || p.Deleted != 4 {
@@ -114,7 +114,7 @@ func TestPrune(t *testing.T) {
 		t.Fatalf("quiet: cursor %d gap %v, want 6 and none", c, from)
 	}
 	var parkedDL int
-	s.db.QueryRow(ctx, `SELECT count(*) FROM dead_letters WHERE subscription = 'parked' AND event_id = 6`).Scan(&parkedDL)
+	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM dead_letters WHERE subscription = 'parked' AND event_id = 6`).Scan(&parkedDL)
 	if parkedDL != 1 {
 		t.Fatal("old5, on parked's poisoned subject, did not join its dead letters")
 	}
@@ -183,7 +183,7 @@ func TestPruneWidensGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 4 {
-		s.Insert(ctx, evOn(fmt.Sprint("e", i), "dev.x", "x/1"))
+		_, _ = s.Insert(ctx, evOn(fmt.Sprint("e", i), "dev.x", "x/1"))
 	}
 	age(t, s, 2)
 	if _, err := s.Prune(ctx, cutoff); err != nil {
@@ -205,14 +205,14 @@ func TestPruneWidensGap(t *testing.T) {
 func TestStaleDeadLetters(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
-	s.Subscribe(ctx, "d", []string{"dev."}, nil)
+	_, _, _, _ = s.Subscribe(ctx, "d", []string{"dev."}, nil)
 	for i, subj := range []string{"x/1", "x/1", "x/2"} {
-		s.Insert(ctx, evOn(fmt.Sprint("d", i), "dev.x", subj))
+		_, _ = s.Insert(ctx, evOn(fmt.Sprint("d", i), "dev.x", subj))
 		if err := s.DeadLetter(ctx, "d", event.Event{Seq: int64(i + 1), Subject: subj}, "boom"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.db.Exec(ctx, `UPDATE dead_letters SET at = now() - interval '4 days' WHERE subject = 'x/1'`)
+	_, _ = s.db.Exec(ctx, `UPDATE dead_letters SET at = now() - interval '4 days' WHERE subject = 'x/1'`)
 	got, err := s.StaleDeadLetters(ctx, 72*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -226,8 +226,8 @@ func TestStaleDeadLetters(t *testing.T) {
 func TestDeadLetterAfterPrune(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
-	s.Subscribe(ctx, "n", []string{"dev."}, nil)
-	s.Insert(ctx, evOn("gone", "dev.x", "x/1"))
+	_, _, _, _ = s.Subscribe(ctx, "n", []string{"dev."}, nil)
+	_, _ = s.Insert(ctx, evOn("gone", "dev.x", "x/1"))
 	age(t, s, 1)
 	if _, err := s.Prune(ctx, time.Now().Add(-30*24*time.Hour)); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestDeadLetterAfterPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	s.db.QueryRow(ctx, `SELECT count(*) FROM dead_letters`).Scan(&n)
+	_ = s.db.QueryRow(ctx, `SELECT count(*) FROM dead_letters`).Scan(&n)
 	if n != 0 {
 		t.Fatal("a dead letter was recorded for a deleted event, parking its subject")
 	}
