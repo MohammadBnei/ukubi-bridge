@@ -82,7 +82,7 @@ func main() {
 	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
 	// alongside Connect and gRPC-Web.
 	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols),
-		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)} // net/http's own lines, WARN
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError)} // net/http's own lines (a panic, an Accept error): ERROR
 	srv.Protocols.SetHTTP1(true)
 	srv.Protocols.SetUnencryptedHTTP2(true)
 	shutdownDone := make(chan struct{})
