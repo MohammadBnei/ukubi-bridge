@@ -35,6 +35,12 @@ on:
       - 'Dockerfile'
       - '.github/workflows/app.yml'
 
+# The default for a job with no permissions block of its own. Every job here
+# declares one today (deploy alone, on main, has contents: write), so this
+# only covers a job added later without one.
+permissions:
+  contents: read
+
 env:
   REGISTRY: registry.bnei.lan:5000
   # Not a secret, and an empty secret cost agent-fleet a release once.
