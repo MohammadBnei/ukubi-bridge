@@ -98,40 +98,75 @@ func TestConfigApp(t *testing.T) {
 	}
 }
 
-// TestConfigRefusals: each refused setting, its line's words and attributes, and the first problem wins in the
-// order the settings were checked before the Config existed.
+// TestConfigRefusals: the one refusal is a missing webhook secret, and it wins over any warning.
 func TestConfigRefusals(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"no secret":               {"BRIDGE_GITHUB_WEBHOOK_SECRET": ""},
+		"secret before retention": {"BRIDGE_GITHUB_WEBHOOK_SECRET": "", "BRIDGE_RETENTION": "nope"},
+	} {
+		_, err := load(envOf(env))
+		if err == nil || err.msg != "BRIDGE_GITHUB_WEBHOOK_SECRET is required" || fmtArgs(err.args) != "[]" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// TestConfigWarnings: an optional setting that does not satisfy its rule is a warning, its line's words and
+// attributes, and its default; the bridge starts. Several are reported in the order they are checked.
+func TestConfigWarnings(t *testing.T) {
 	key := keyPEM(t)
 	app := map[string]string{"BRIDGE_GITHUB_APP_ID": "7", "BRIDGE_GITHUB_APP_PRIVATE_KEY": key}
+	const retention = "BRIDGE_RETENTION must be a Go duration of at least 24h; using the default"
+	const badKey = "BRIDGE_GITHUB_APP_PRIVATE_KEY does not parse; the reconcile loop is off"
+	const lookback = "BRIDGE_RECONCILE_LOOKBACK is not a Go duration; using the default"
 	for _, c := range []struct {
-		name string
-		env  map[string]string
-		msg  string
-		args string
+		name  string
+		env   map[string]string
+		lines []string // msg and attributes, in order
+		check func(Config) bool
 	}{
-		{"no secret", map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": ""}, "BRIDGE_GITHUB_WEBHOOK_SECRET is required", "[]"},
-		{"retention", map[string]string{"BRIDGE_RETENTION": "nope"}, "BRIDGE_RETENTION must be a Go duration of at least 24h", "[value nope]"},
-		{"short retention", map[string]string{"BRIDGE_RETENTION": "23h59m"}, "BRIDGE_RETENTION must be a Go duration of at least 24h", "[value 23h59m]"},
-		{"key", map[string]string{"BRIDGE_GITHUB_APP_ID": "7", "BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, "BRIDGE_GITHUB_APP_PRIVATE_KEY", "[err no PEM block in private key]"},
-		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, "BRIDGE_RECONCILE_LOOKBACK", `[err time: invalid duration "nope"]`},
-		{"secret before retention", map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "", "BRIDGE_RETENTION": "nope"}, "BRIDGE_GITHUB_WEBHOOK_SECRET is required", "[]"},
-		{"retention before key", map[string]string{"BRIDGE_RETENTION": "nope", "BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, "BRIDGE_RETENTION must be a Go duration of at least 24h", "[value nope]"},
-		{"key before lookback", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope", "BRIDGE_RECONCILE_LOOKBACK": "nope"}, "BRIDGE_GITHUB_APP_PRIVATE_KEY", "[err no PEM block in private key]"},
+		{"retention", map[string]string{"BRIDGE_RETENTION": "nope"}, []string{retention + " [value nope default 720h0m0s]"},
+			func(c Config) bool { return c.Retention == 720*time.Hour && c.App != nil }},
+		{"short retention", map[string]string{"BRIDGE_RETENTION": "23h59m"}, []string{retention + " [value 23h59m default 720h0m0s]"},
+			func(c Config) bool { return c.Retention == 720*time.Hour }},
+		{"key", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, []string{badKey + " [err no PEM block in private key]"},
+			func(c Config) bool { return c.App == nil }},
+		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, []string{lookback + ` [err time: invalid duration "nope" default 6h0m0s]`},
+			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
+		{"zero lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "0s"}, []string{"BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default [value 0s default 6h0m0s]"},
+			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
+		{"negative lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "-1h"}, []string{"BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default [value -1h default 6h0m0s]"},
+			func(c Config) bool { return c.App != nil && c.App.Lookback == 6*time.Hour }},
+		{"retention before key", map[string]string{"BRIDGE_RETENTION": "nope", "BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"},
+			[]string{retention + " [value nope default 720h0m0s]", badKey + " [err no PEM block in private key]"},
+			func(c Config) bool { return c.Retention == 720*time.Hour && c.App == nil }},
+		{"key before lookback: a key that does not parse leaves no lookback to read", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope", "BRIDGE_RECONCILE_LOOKBACK": "nope"},
+			[]string{badKey + " [err no PEM block in private key]"}, func(c Config) bool { return c.App == nil }},
 	} {
 		env := map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s"}
 		maps.Copy(env, app)
 		maps.Copy(env, c.env)
-		_, err := load(envOf(env))
-		if err == nil {
-			t.Errorf("%s: accepted", c.name)
+		got, err := load(envOf(env))
+		if err != nil {
+			t.Errorf("%s: refused: %s", c.name, err.msg)
 			continue
 		}
-		if err.msg != c.msg || fmtArgs(err.args) != c.args {
-			t.Errorf("%s: %q %s, want %q %s", c.name, err.msg, fmtArgs(err.args), c.msg, c.args)
+		var lines []string
+		for _, w := range got.Warnings {
+			lines = append(lines, w.msg+" "+fmtArgs(w.args))
+		}
+		if !slices.Equal(lines, c.lines) {
+			t.Errorf("%s: warnings %q, want %q", c.name, lines, c.lines)
+		}
+		if !c.check(got) {
+			t.Errorf("%s: not the defaults: %+v", c.name, got)
 		}
 	}
-	if _, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_RETENTION": "24h"})); err != nil {
-		t.Errorf("exactly 24h: %v", err) // the positive control for the short retention
+	// The positive control: good values give no warning and are used.
+	c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_RETENTION": "24h", "BRIDGE_GITHUB_APP_ID": "7",
+		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h"}))
+	if err != nil || c.Warnings != nil || c.Retention != 24*time.Hour || c.App == nil || c.App.Lookback != time.Hour {
+		t.Errorf("good values: %v %+v", err, c)
 	}
 }
 
@@ -331,25 +366,38 @@ func TestEnvUses(t *testing.T) {
 	}
 }
 
-// TestConfigTraces: the traces endpoint is an http(s) URL with its path, or unset (no tracing).
+// TestConfigTraces: the traces endpoint is an http(s) URL with its path, or unset (no tracing). Anything else is a
+// warning and no tracing.
 func TestConfigTraces(t *testing.T) {
+	const msg = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces); tracing is off"
 	for v, ok := range map[string]bool{"": true, "http://alloy.monitoring:4318/v1/traces": true, "https://x/v1/traces": true,
 		"nope": false, "http://alloy:4318": false, "http://alloy:4318/": false, "grpc://alloy:4317/v1/traces": false} {
 		c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": v}))
-		if (err == nil) != ok || (ok && c.Traces != v) {
-			t.Errorf("%q: %v %q", v, err, c.Traces)
+		if err != nil {
+			t.Errorf("%q: refused: %s", v, err.msg)
+			continue
 		}
-		if err != nil && (err.msg != "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)" || fmtArgs(err.args) != "[value "+v+"]") {
-			t.Errorf("%q: %q %s", v, err.msg, fmtArgs(err.args))
+		if ok {
+			if c.Traces != v || c.Warnings != nil {
+				t.Errorf("%q: %q %v", v, c.Traces, c.Warnings)
+			}
+			continue
+		}
+		if c.Traces != "" || len(c.Warnings) != 1 || c.Warnings[0].msg != msg || fmtArgs(c.Warnings[0].args) != "[value "+v+"]" {
+			t.Errorf("%q: traces %q, warnings %v", v, c.Traces, c.Warnings)
 		}
 	}
 }
 
-// TestConfigTracesRedacted: a refused endpoint is logged without its password.
+// TestConfigTracesRedacted: a bad endpoint is logged without its password, in any form: parsed, unparsable, or with
+// no scheme.
 func TestConfigTracesRedacted(t *testing.T) {
-	_, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://u:hunter2@alloy:4318"}))
-	if err == nil || fmtArgs(err.args) != "[value http://u:xxxxx@alloy:4318]" {
-		t.Errorf("%v", err)
+	for _, v := range []string{"http://u:hunter2@alloy:4318", "http://u:hunter2@c/v1/traces\n", "http://u:hunter2@c:abc/v1/traces",
+		"http://u:hunter2@[::1/v1/traces", " http://u:hunter2@c/v1/traces", "u:hunter2@c:4318"} {
+		c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": v}))
+		if err != nil || len(c.Warnings) != 1 || fmtArgs(c.Warnings[0].args) != "[value <redacted: contains @>]" {
+			t.Errorf("%q: %v %v", v, err, c.Warnings)
+		}
 	}
 }
 

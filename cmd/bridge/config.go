@@ -34,7 +34,12 @@ type Config struct {
 	Retention       time.Duration
 	Port            string
 	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
-	App             *AppConfig // nil: the reconcile loop is off (no App id or no key)
+	App             *AppConfig // nil: the reconcile loop is off (no App id or no key, or a key that does not parse)
+	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
+	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
+	// each at WARN. load's one refusal is a missing webhook secret; the settings only a constructor can check (the
+	// client table, the pinned certificate, the database URL) still refuse in main, closed.
+	Warnings []*configError
 }
 
 // OIDCConfig is how API clients sign in through authentik (ADR-0066).
@@ -47,7 +52,8 @@ type AppConfig struct {
 	Lookback time.Duration
 }
 
-// configError is a refused setting, logged as its own line: msg and its attributes, as slog.Error takes them.
+// configError is a setting's problem, logged as its own line: msg and its attributes, as slog takes them. A refusal
+// is logged at ERROR, a warning (Config.Warnings) at WARN.
 type configError struct {
 	msg  string
 	args []any
@@ -58,9 +64,13 @@ func (e *configError) Error() string { return e.msg }
 // log writes the refusal's line.
 func (e *configError) log() { slog.Error(e.msg, e.args...) }
 
-// load reads the configuration from getenv. A refusal is the first problem, in the order the settings were checked
-// before the Config existed (the webhook secret, the retention, the App's key, the lookback), the traces endpoint
-// after the retention.
+// warn writes the warning's line.
+func (e *configError) warn() { slog.Warn(e.msg, e.args...) }
+
+// load reads the configuration from getenv. Its one refusal is a missing webhook secret: the bridge cannot do its
+// job without it (main still refuses what only a constructor can check: see Config). Every other setting is optional, and a value that does not satisfy its rule is a warning
+// (Config.Warnings) and its default, in the order the settings are checked: the retention, the traces endpoint, the
+// App's key, the lookback.
 func load(getenv func(string) string) (Config, *configError) {
 	c := Config{
 		WebhookSecret: getenv("BRIDGE_GITHUB_WEBHOOK_SECRET"),
@@ -80,9 +90,10 @@ func load(getenv func(string) string) (Config, *configError) {
 		return Config{}, &configError{msg: "BRIDGE_GITHUB_WEBHOOK_SECRET is required"}
 	}
 	if v := getenv("BRIDGE_RETENTION"); v != "" {
-		var err error
-		if c.Retention, err = time.ParseDuration(v); err != nil || c.Retention < 24*time.Hour {
-			return Config{}, &configError{msg: "BRIDGE_RETENTION must be a Go duration of at least 24h", args: []any{"value", v}}
+		if d, err := time.ParseDuration(v); err != nil || d < 24*time.Hour {
+			c.warn("BRIDGE_RETENTION must be a Go duration of at least 24h; using the default", "value", v, "default", c.Retention.String())
+		} else {
+			c.Retention = d
 		}
 	}
 	if c.Port == "" {
@@ -91,10 +102,14 @@ func load(getenv func(string) string) (Config, *configError) {
 	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
 		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {
 			shown := "(not a URL)"
-			if err == nil {
-				shown = u.Redacted() // a user:pass in it is never logged
+			switch {
+			case strings.Contains(c.Traces, "@"): // any user:password form, parsed or not, scheme or not, is never logged
+				shown = "<redacted: contains @>"
+			case err == nil:
+				shown = u.String()
 			}
-			return Config{}, &configError{msg: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)", args: []any{"value", shown}}
+			c.warn("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces); tracing is off", "value", shown)
+			c.Traces = ""
 		}
 	}
 	appID, pemKey := getenv("BRIDGE_GITHUB_APP_ID"), getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
@@ -103,16 +118,26 @@ func load(getenv func(string) string) (Config, *configError) {
 	}
 	key, err := github.ParseKey(pemKey)
 	if err != nil {
-		return Config{}, &configError{msg: "BRIDGE_GITHUB_APP_PRIVATE_KEY", args: []any{"err", err}}
+		c.warn("BRIDGE_GITHUB_APP_PRIVATE_KEY does not parse; the reconcile loop is off", "err", err)
+		return c, nil
 	}
 	app := &AppConfig{ID: appID, Key: key, Lookback: 6 * time.Hour}
 	if v := getenv("BRIDGE_RECONCILE_LOOKBACK"); v != "" {
-		if app.Lookback, err = time.ParseDuration(v); err != nil {
-			return Config{}, &configError{msg: "BRIDGE_RECONCILE_LOOKBACK", args: []any{"err", err}}
+		if d, err := time.ParseDuration(v); err != nil {
+			c.warn("BRIDGE_RECONCILE_LOOKBACK is not a Go duration; using the default", "err", err, "default", app.Lookback.String())
+		} else if d <= 0 {
+			c.warn("BRIDGE_RECONCILE_LOOKBACK must be above 0; using the default", "value", v, "default", app.Lookback.String())
+		} else {
+			app.Lookback = d
 		}
 	}
 	c.App = app
 	return c, nil
+}
+
+// warn records an optional setting's problem; the caller keeps the default.
+func (c *Config) warn(msg string, args ...any) {
+	c.Warnings = append(c.Warnings, &configError{msg: msg, args: args})
 }
 
 // fromProcess is the process's configuration: the one place that reads its environment.

@@ -34,6 +34,9 @@ func main() {
 		cerr.log()
 		os.Exit(1)
 	}
+	for _, w := range cfg.Warnings {
+		w.warn()
+	}
 	// API clients are authentik service accounts (infra-bootstrap ADR-0066):
 	// the table holds permissions, the pinned certificate is the trust anchor.
 	if cfg.LegacyClients {
@@ -233,11 +236,12 @@ func retain(ctx context.Context, api *bus.Server, st *store.Store, keep, every t
 	}
 }
 
-// reconciler is nil, with a warning, when the App credentials are absent:
-// ingest still works, lost deliveries just stay lost.
+// reconciler is nil, with a warning, when the App credentials are absent or
+// unusable (a key that does not parse is warned about by load first): ingest
+// still works, lost deliveries just stay lost.
 func reconciler(st *store.Store, app *AppConfig) *github.Reconciler {
 	if app == nil {
-		slog.Warn("github reconcile disabled: BRIDGE_GITHUB_APP_ID or BRIDGE_GITHUB_APP_PRIVATE_KEY unset")
+		slog.Warn("github reconcile disabled: no usable GitHub App credentials (BRIDGE_GITHUB_APP_ID and BRIDGE_GITHUB_APP_PRIVATE_KEY)")
 		return nil
 	}
 	return &github.Reconciler{API: "https://api.github.com", AppID: app.ID, Key: app.Key, Lookback: app.Lookback,
