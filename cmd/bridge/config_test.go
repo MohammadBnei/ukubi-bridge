@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"maps"
 	"os"
@@ -344,19 +345,39 @@ func TestConfigTraces(t *testing.T) {
 	}
 }
 
-// TestTracedWiring: main traces the API (its interceptors) and every webhook route (route wraps each).
+// TestConfigTracesRedacted: a refused endpoint is logged without its password.
+func TestConfigTracesRedacted(t *testing.T) {
+	_, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://u:hunter2@alloy:4318"}))
+	if err == nil || fmtArgs(err.args) != "[value http://u:xxxxx@alloy:4318]" {
+		t.Errorf("%v", err)
+	}
+}
+
+// TestTracedWiring: main registers on its mux only through route (which traces), plus /healthz and the API (whose
+// interceptors trace it; TestMainTraces runs them all). A route added with mux.Handle or mux.HandleFunc fails here.
 func TestTracedWiring(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"api.Handler(tel.Interceptors()...)", `route("POST /webhook/github",`, `route("POST /webhook/alertmanager",`,
-		`route("POST /webhook/grafana",`, "mux.Handle(pattern, tel.Handler(pattern, h))"} {
-		if !strings.Contains(string(src), want) {
-			t.Errorf("main.go: no %s", want)
+	var got []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
-	}
-	if strings.Count(string(src), `mux.Handle("POST /webhook`) != 0 {
-		t.Error("a webhook route registered untraced")
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if id, isID := sel.X.(*ast.Ident); !isID || id.Name != "mux" {
+			return true
+		}
+		got = append(got, sel.Sel.Name+"("+types.ExprString(c.Args[0])+")")
+		return true
+	})
+	want := `HandleFunc("GET /healthz") Handle(pattern) Handle(api.Handler(tel.Interceptors()...))`
+	if strings.Join(got, " ") != want {
+		t.Errorf("main.go's mux calls: %s, want %s (a traced route goes through route)", strings.Join(got, " "), want)
 	}
 }

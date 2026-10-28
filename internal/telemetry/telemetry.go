@@ -3,7 +3,13 @@
 // exactly what it served before. Its shape is mountain/pkg/telemetry's, which the bridge does not import (plan/15 §3).
 //
 // Everything that decides a span is passed explicitly (the provider, the propagator, no meter: otelconnect's own
-// metrics are off and otelhttp's go to a no-op meter, so no series is added): no OTel global is set.
+// metrics are off and otelhttp's go to a no-op meter, so no series is added). The one OTel global set, and only with
+// an endpoint, is the error handler: the SDK reports a failed export there, and its default writes through the log
+// package, which the JSON logger records at INFO; New's logs it at WARN, so a collector that never answers is seen.
+//
+// The SDK still reads its own OTEL_* variables (the exporter's headers, timeout, compression and certificates, the
+// batch processor's OTEL_BSP_*, span limits, resource attributes); the endpoint and the service name are set here
+// and win over theirs. OTEL_EXPORTER_OTLP_ENDPOINT alone turns nothing on (config.go reads the traces one only).
 //
 // Spans: one server span per BridgeService call (otelconnect, named by procedure; a stream's lasts as long as the
 // stream) and per webhook route (named by its pattern). The bridge is public, so a caller's traceparent starts a new
@@ -12,6 +18,7 @@ package telemetry
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -19,6 +26,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/otelconnect"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
@@ -45,6 +53,7 @@ func New(endpoint, service string) (*Tracing, error) {
 	if err != nil {
 		return nil, err
 	}
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) { slog.Warn("traces", "err", err) }))
 	return WithExporter(exp, service), nil
 }
 

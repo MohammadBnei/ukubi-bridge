@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -88,7 +89,8 @@ func main() {
 	port := cfg.Port
 	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
 	// alongside Connect and gRPC-Web.
-	srv := &http.Server{Addr: ":" + port, Handler: mux, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols),
+	inflight := &handlers{h: mux}
+	srv := &http.Server{Addr: ":" + port, Handler: inflight, ReadHeaderTimeout: 10 * time.Second, Protocols: new(http.Protocols),
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError)} // net/http's own lines (a panic, an Accept error): ERROR
 	srv.Protocols.SetHTTP1(true)
 	srv.Protocols.SetUnencryptedHTTP2(true)
@@ -110,11 +112,37 @@ func main() {
 		os.Exit(1)
 	}
 	// ListenAndServe returns as soon as Shutdown starts; wait for in-flight
-	// handlers before the deferred st.Close.
+	// handlers before the deferred st.Close, and before tel.Shutdown: Close does
+	// not wait for them, and a span that ends after Shutdown is dropped.
 	<-shutdownDone
+	if !inflight.wait(5 * time.Second) {
+		slog.Warn("handlers still running at exit")
+	}
 	if err := tel.Shutdown(); err != nil {
 		slog.Warn("traces", "err", err)
 	}
+}
+
+// handlers counts the requests in flight, so main can wait for them after srv.Close, which does not.
+type handlers struct {
+	h http.Handler
+	n atomic.Int64
+}
+
+func (h *handlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.n.Add(1)
+	defer h.n.Add(-1)
+	h.h.ServeHTTP(w, r)
+}
+
+// wait waits until no request is in flight, at most d: false if some still were.
+func (h *handlers) wait(d time.Duration) bool {
+	for end := time.Now().Add(d); h.n.Load() > 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			return false
+		}
+	}
+	return true
 }
 
 // maxBody caps a /webhook/github body (see githubHandler).

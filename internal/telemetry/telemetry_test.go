@@ -1,12 +1,17 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -107,5 +112,20 @@ func TestAPISpans(t *testing.T) {
 	s := check(t, exp, "bridge.v1.BridgeService/Publish")
 	if s.Status.Code.String() != "Error" {
 		t.Errorf("status %v", s.Status)
+	}
+}
+
+// TestErrorHandler: with an endpoint, the SDK's errors (a failed export) are logged at WARN, not INFO through log.
+func TestErrorHandler(t *testing.T) {
+	old := slog.Default()
+	defer slog.SetDefault(old)
+	var w bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&w, nil)))
+	if _, err := New("http://127.0.0.1:1/v1/traces", "test"); err != nil {
+		t.Fatal(err)
+	}
+	otel.Handle(errors.New("export refused"))
+	if got := w.String(); !strings.Contains(got, "level=WARN msg=traces") || !strings.Contains(got, "export refused") {
+		t.Errorf("logged %q", got)
 	}
 }

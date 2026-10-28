@@ -90,7 +90,11 @@ func load(getenv func(string) string) (Config, *configError) {
 	}
 	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
 		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {
-			return Config{}, &configError{msg: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)", args: []any{"value", c.Traces}}
+			shown := "(not a URL)"
+			if err == nil {
+				shown = u.Redacted() // a user:pass in it is never logged
+			}
+			return Config{}, &configError{msg: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)", args: []any{"value", shown}}
 		}
 	}
 	appID, pemKey := getenv("BRIDGE_GITHUB_APP_ID"), getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
