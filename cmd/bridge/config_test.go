@@ -115,6 +115,7 @@ func TestConfigRefusals(t *testing.T) {
 		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, "BRIDGE_RECONCILE_LOOKBACK", `[err time: invalid duration "nope"]`},
 		{"secret before retention", map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "", "BRIDGE_RETENTION": "nope"}, "BRIDGE_GITHUB_WEBHOOK_SECRET is required", "[]"},
 		{"retention before key", map[string]string{"BRIDGE_RETENTION": "nope", "BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, "BRIDGE_RETENTION must be a Go duration of at least 24h", "[value nope]"},
+		{"key before lookback", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope", "BRIDGE_RECONCILE_LOOKBACK": "nope"}, "BRIDGE_GITHUB_APP_PRIVATE_KEY", "[err no PEM block in private key]"},
 	} {
 		env := map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s"}
 		maps.Copy(env, app)
@@ -145,14 +146,13 @@ func fmtArgs(args []any) string {
 	return "[" + strings.Join(s, " ") + "]"
 }
 
-// TestConfigDocumented: envVars, load's own reads and README.md's Configuration table name the same variables.
+// TestConfigDocumented: envVars, load's own reads and README.md's table rows (any row whose first cell names
+// variables) name the same variables, as sets.
 func TestConfigDocumented(t *testing.T) {
 	read := map[string]bool{}
+	all := map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_GITHUB_APP_ID": "1", "BRIDGE_GITHUB_APP_PRIVATE_KEY": keyPEM(t)}
 	load(func(k string) string { read[k] = true; return "" })
-	load(func(k string) string {
-		read[k] = true
-		return map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_GITHUB_APP_ID": "1", "BRIDGE_GITHUB_APP_PRIVATE_KEY": keyPEM(t)}[k]
-	})
+	load(func(k string) string { read[k] = true; return all[k] })
 	listed := map[string]bool{}
 	for _, v := range envVars {
 		listed[v] = true
@@ -306,12 +306,18 @@ func TestEnvUses(t *testing.T) {
 		{`import . "os"; var _ = Getenv("X")`, []string{"import . os"}},
 		{`import "os"; var _, _ = os.UserHomeDir()`, []string{"os.UserHomeDir"}},
 		{`import "syscall"; var _, _ = syscall.Getenv("X")`, []string{"syscall.Getenv"}},
+		{`import "os"; var _ = os.TempDir()`, []string{"os.TempDir"}},
+		{`import "os"; var _, _ = os.MkdirTemp("", "x")`, []string{"os.MkdirTemp"}},
+		{`import "os"; var _, _ = os.CreateTemp("", "x")`, []string{"os.CreateTemp"}},
+		{`import "os"; var _, _ = os.Getwd()`, []string{"os.Getwd"}},
+		{`import "net/http"; var _ = http.ProxyFromEnvironment`, []string{"net/http.ProxyFromEnvironment"}},
 		{`import h "net/http"; var _ = h.ProxyFromEnvironment`, []string{"net/http.ProxyFromEnvironment"}},
 		{`import "os/exec"; var _ = exec.Command`, []string{"import os/exec"}},
 		{`import u "os/user"; var _, _ = u.Current()`, []string{"import os/user"}},
 		{`import "C"`, []string{"import C"}},
 		{"import _ \"unsafe\"\n//go:linkname getenv syscall.Getenv\nfunc getenv(string) (string, bool)", []string{"go:linkname"}},
 		{`import "os"; var _ = os.Args; var _ = os.Stderr`, nil},
+		{`import "net/http"; var _ = http.StatusOK`, nil},
 		{`type t struct{ Getenv func(string) string }; var os t; var _ = os.Getenv`, nil}, // no import: not os
 	} {
 		got, err := envUses("x.go", []byte("package x\n"+c.src))

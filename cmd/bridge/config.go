@@ -10,8 +10,8 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 )
 
-// envVars is every variable load reads, in README.md's order: TestConfigDocumented holds the two to each other and
-// to load's own reads. The libraries' reads (pgx's PG* defaults, net/http's proxy variables) are theirs.
+// envVars is every variable load reads: TestConfigDocumented holds it, load's own reads and README.md's table to the
+// same set. The libraries' reads (pgx's PG* defaults, net/http's proxy variables) are theirs.
 var envVars = []string{
 	"BRIDGE_DATABASE_URL", "BRIDGE_GITHUB_WEBHOOK_SECRET", "BRIDGE_TRUSTED_LOGINS", "BRIDGE_AGENT_LOGINS",
 	"BRIDGE_API_CLIENTS", "BRIDGE_OIDC_ISSUER", "BRIDGE_OIDC_CLIENT_ID", "BRIDGE_OIDC_CERT", "BRIDGE_OIDC_JWKS_URL",
