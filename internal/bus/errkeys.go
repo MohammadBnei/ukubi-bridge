@@ -3,6 +3,7 @@ package bus
 import (
 	"context"
 	"errors"
+	"os"
 
 	"connectrpc.com/connect"
 
@@ -91,8 +92,8 @@ func hasKey(err error) bool {
 }
 
 // keyAll keys an error a handler returns without one (a raw Send failure, a path that forgot) as keyInternal,
-// keeping its code and words: every error a handler returns carries a key. Errors Connect raises before the handler
-// runs (an unreadable body, an unknown procedure) carry none.
+// keeping its code and words, on a copy (the handler's own error is never changed): every error a handler returns
+// carries a key. Errors Connect raises before the handler runs (an unreadable body, an unknown procedure) carry none.
 type keyAll struct{}
 
 func (keyAll) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
@@ -115,11 +116,32 @@ func withKey(err error) error {
 		return err
 	}
 	var ce *connect.Error
-	if errors.As(err, &ce) {
-		addKey(ce, keyInternal, "")
-		return ce
+	if !errors.As(err, &ce) {
+		e := connect.NewError(plainCode(err), err) // a plain error: the code Connect would send for it
+		addKey(e, keyInternal, "")
+		return e
 	}
-	e := connect.NewError(connect.CodeOf(err), err) // a plain error: Connect's own code for it, as it would answer
+	// A copy, never ce itself: a handler may return a shared sentinel, which adding to would race across requests
+	// and stay keyed for in-process callers.
+	e := connect.NewError(ce.Code(), ce.Unwrap())
+	for _, d := range ce.Details() {
+		e.AddDetail(d)
+	}
+	for k, v := range ce.Meta() {
+		e.Meta()[k] = append([]string(nil), v...)
+	}
 	addKey(e, keyInternal, "")
 	return e
+}
+
+// plainCode is the code Connect sends for a plain error (its toWire, wrapIfContextError): a context error's own,
+// wrapped or not, else Unknown.
+func plainCode(err error) connect.Code {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return connect.CodeCanceled
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return connect.CodeDeadlineExceeded
+	}
+	return connect.CodeUnknown
 }
