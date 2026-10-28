@@ -150,6 +150,14 @@ unparked, so work in rounds. Fix the subscriber, then:
 
 Once cleared, the next retention run deletes those events if they are old.
 
+## Errors
+
+Every BridgeService error carries Connect's code, the same words as before, and an `ErrorKey {key, source}`
+detail (mountain plan/15 §4). A client branches on the code and the key, never on the message. The keys are a
+closed registry in `internal/bus/errkeys.go` (`auth.bearer_required`, `stream.gapped`, `store.unavailable`, …);
+`source` is `postgres` when the message is the store's own words, empty for the bridge's. The webhook endpoints
+answer GitHub, Alertmanager and Grafana in plain text, by status only, as before.
+
 ## Configuration
 
 | Env | Meaning |

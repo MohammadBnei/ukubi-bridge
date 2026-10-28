@@ -835,6 +835,63 @@ func (x *ReplayResponse) GetGap() *Gap {
 	return nil
 }
 
+// ErrorKey rides as a detail on every error a BridgeService call answers
+// (mountain plan/15 §4): a stable key from the bridge's closed registry
+// (internal/bus/errkeys.go), which a client branches on beside the code, and
+// the source whose words the message holds ("" for the bridge's own, "postgres"
+// for the store's). Messages are for people and may change; keys do not.
+type ErrorKey struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Source        string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ErrorKey) Reset() {
+	*x = ErrorKey{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ErrorKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ErrorKey) ProtoMessage() {}
+
+func (x *ErrorKey) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ErrorKey.ProtoReflect.Descriptor instead.
+func (*ErrorKey) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ErrorKey) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *ErrorKey) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
 var File_bridge_v1_bridge_proto protoreflect.FileDescriptor
 
 const file_bridge_v1_bridge_proto_rawDesc = "" +
@@ -892,7 +949,10 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\"_\n" +
 	"\x0eReplayResponse\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\x12 \n" +
-	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap2\x96\x03\n" +
+	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\"4\n" +
+	"\bErrorKey\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source2\x96\x03\n" +
 	"\rBridgeService\x12@\n" +
 	"\aPublish\x12\x19.bridge.v1.PublishRequest\x1a\x1a.bridge.v1.PublishResponse\x12H\n" +
 	"\tSubscribe\x12\x1b.bridge.v1.SubscribeRequest\x1a\x1c.bridge.v1.SubscribeResponse0\x01\x124\n" +
@@ -914,7 +974,7 @@ func file_bridge_v1_bridge_proto_rawDescGZIP() []byte {
 	return file_bridge_v1_bridge_proto_rawDescData
 }
 
-var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*CloudEvent)(nil),            // 0: bridge.v1.CloudEvent
 	(*PublishRequest)(nil),        // 1: bridge.v1.PublishRequest
@@ -930,10 +990,11 @@ var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*NackResponse)(nil),          // 11: bridge.v1.NackResponse
 	(*ReplayRequest)(nil),         // 12: bridge.v1.ReplayRequest
 	(*ReplayResponse)(nil),        // 13: bridge.v1.ReplayResponse
-	(*timestamppb.Timestamp)(nil), // 14: google.protobuf.Timestamp
+	(*ErrorKey)(nil),              // 14: bridge.v1.ErrorKey
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
 }
 var file_bridge_v1_bridge_proto_depIdxs = []int32{
-	14, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
+	15, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: bridge.v1.PublishRequest.event:type_name -> bridge.v1.CloudEvent
 	0,  // 2: bridge.v1.SubscribeResponse.event:type_name -> bridge.v1.CloudEvent
 	5,  // 3: bridge.v1.SubscribeResponse.gap:type_name -> bridge.v1.Gap
@@ -969,7 +1030,7 @@ func file_bridge_v1_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_v1_bridge_proto_rawDesc), len(file_bridge_v1_bridge_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

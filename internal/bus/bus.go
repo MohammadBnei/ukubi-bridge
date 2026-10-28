@@ -219,15 +219,15 @@ var errExpired = errors.New("token expired")
 func (s *Server) auth(h http.Header) (Client, time.Time, error) {
 	tok, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || tok == "" {
-		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, errors.New("bearer token required"))
+		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyBearer, errors.New("bearer token required"))
 	}
 	sub, exp, err := s.tokens.Verify(tok)
 	if err != nil {
-		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, err)
+		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyToken, err)
 	}
 	c, ok := s.clients[sub]
 	if !ok {
-		return Client{}, time.Time{}, connect.NewError(connect.CodeUnauthenticated, fmt.Errorf("%s is not a bridge client", sub))
+		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyNotClient, fmt.Errorf("%s is not a bridge client", sub))
 	}
 	return c, exp, nil
 }
@@ -239,7 +239,7 @@ func (s *Server) owns(h http.Header, sub string) (Client, time.Time, error) {
 		return c, exp, err
 	}
 	if len(c.Subscribe) == 0 || (sub != c.Name && !strings.HasPrefix(sub, c.Name+"/")) {
-		return c, exp, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
+		return c, exp, keyed(connect.CodePermissionDenied, keyNotOwned, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
 	}
 	return c, exp, nil
 }
@@ -253,7 +253,7 @@ var MinStreamLife = 5 * time.Second
 // flight then is redelivered on the next stream, as after any disconnect.
 func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.CancelFunc, error) {
 	if exp.Before(time.Now().Add(MinStreamLife)) {
-		return nil, nil, connect.NewError(connect.CodeUnauthenticated, errors.New("token too close to expiry to open a stream"))
+		return nil, nil, keyed(connect.CodeUnauthenticated, keyNearExpiry, errors.New("token too close to expiry to open a stream"))
 	}
 	ctx, cancel := context.WithDeadlineCause(ctx, exp, errExpired)
 	return ctx, cancel, nil
@@ -264,9 +264,9 @@ func untilExpiry(ctx context.Context, exp time.Time) (context.Context, context.C
 func ended(ctx context.Context) error {
 	switch cause := context.Cause(ctx); {
 	case errors.Is(cause, errExpired):
-		return connect.NewError(connect.CodeUnauthenticated, errExpired)
+		return keyed(connect.CodeUnauthenticated, keyExpired, errExpired)
 	case errors.Is(cause, errGapped):
-		return connect.NewError(connect.CodeAborted, cause)
+		return keyed(connect.CodeAborted, keyGapped, cause)
 	}
 	return nil // the client went away, or a newer stream took over (it must not reconnect)
 }
@@ -277,7 +277,7 @@ func unavailable(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ended(ctx) // the bridge or the client ended the stream; not an outage
 	}
-	return connect.NewError(connect.CodeUnavailable, err)
+	return sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 }
 
 func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
@@ -287,27 +287,27 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	}
 	p := req.Msg.GetEvent()
 	if p.GetId() == "" || p.GetType() == "" || p.GetSubject() == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("id, type and subject are required"))
+		return nil, keyed(connect.CodeInvalidArgument, keyFields, errors.New("id, type and subject are required"))
 	}
 	if !slices.ContainsFunc(c.PublishTypes, func(pre string) bool { return strings.HasPrefix(p.GetType(), pre) }) {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not publish %s", c.Name, p.GetType()))
+		return nil, keyed(connect.CodePermissionDenied, keyType, fmt.Errorf("%s may not publish %s", c.Name, p.GetType()))
 	}
 	if !slices.ContainsFunc(c.PublishSubjects, func(pre string) bool { return strings.HasPrefix(p.GetSubject(), pre) }) {
-		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not publish on subject %s", c.Name, p.GetSubject()))
+		return nil, keyed(connect.CodePermissionDenied, keySubject, fmt.Errorf("%s may not publish on subject %s", c.Name, p.GetSubject()))
 	}
 	// Negative hops would undercut the +1 stamp below; MaxInt32 would overflow it.
 	// ponytail: an unprivileged client's hops is still its own claim (it can
 	// send 0); derive it from the causation_id event's stored hops if an app
 	// ever drives a loop.
 	if p.GetHops() < 0 || p.GetHops() == math.MaxInt32 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("hops out of range"))
+		return nil, keyed(connect.CodeInvalidArgument, keyHops, errors.New("hops out of range"))
 	}
 	data := p.GetData()
 	if len(data) == 0 {
 		data = []byte("null")
 	}
 	if !json.Valid(data) {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("data must be JSON"))
+		return nil, keyed(connect.CodeInvalidArgument, keyData, errors.New("data must be JSON"))
 	}
 	e := event.Event{
 		ID: p.GetId(), Source: "client/" + c.Name, Type: p.GetType(), Subject: p.GetSubject(),
@@ -320,7 +320,7 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	}
 	if c.Privileged {
 		if !validActor(e.Actor) {
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown actor %q", e.Actor))
+			return nil, keyed(connect.CodeInvalidArgument, keyActor, fmt.Errorf("unknown actor %q", e.Actor))
 		}
 	} else {
 		// The client vouches only for itself: its own kind, never trusted,
@@ -330,10 +330,10 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	}
 	inserted, err := s.st.Insert(ctx, e)
 	if store.Invalid(err) {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err) // retrying cannot help
+		return nil, sourced(connect.CodeInvalidArgument, keyRefused, sourcePostgres, err) // retrying cannot help
 	}
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 	}
 	return connect.NewResponse(&bridgev1.PublishResponse{Duplicate: !inserted}), nil
 }
@@ -345,7 +345,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		return err
 	}
 	if !c.mayRead(req.Msg.GetTypes(), req.Msg.GetSubjects()) {
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may not read that filter", c.Name))
+		return keyed(connect.CodePermissionDenied, keyFilter, fmt.Errorf("%s may not read that filter", c.Name))
 	}
 	ctx, cancel, err := untilExpiry(ctx, exp)
 	if err != nil {
@@ -381,7 +381,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	if v, err := s.st.GapVersion(ctx, name); err != nil {
 		return unavailable(ctx, err)
 	} else if v != readVer {
-		return connect.NewError(connect.CodeAborted, errGapped) // gapped in between: reconnect to it
+		return keyed(connect.CodeAborted, keyGapped, errGapped) // gapped in between: reconnect to it
 	}
 
 	// Send headers now: the client's call returns once the subscription is
@@ -478,7 +478,7 @@ func (s *Server) claim(sub string, seq int64) (*stream, event.Event, error) {
 	defer s.mu.Unlock()
 	st := s.live[sub]
 	if st == nil || seq == 0 || st.inflight.Seq != seq {
-		return nil, event.Event{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("event %d is not in flight on %q", seq, sub))
+		return nil, event.Event{}, keyed(connect.CodeFailedPrecondition, keyNotInFlight, fmt.Errorf("event %d is not in flight on %q", seq, sub))
 	}
 	e := st.inflight
 	st.inflight = event.Event{}
@@ -496,7 +496,7 @@ func (s *Server) Ack(ctx context.Context, req *connect.Request[bridgev1.AckReque
 	}
 	if err := s.st.Ack(ctx, sub, seq); err != nil {
 		st.done <- outcome{} // redeliver; subscribers are idempotent on (source, id)
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.AckResponse{}), nil
@@ -513,20 +513,20 @@ func (s *Server) ConfirmGap(ctx context.Context, req *connect.Request[bridgev1.C
 		return nil, err
 	}
 	if v <= 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("version must be positive"))
+		return nil, keyed(connect.CodeInvalidArgument, keyGapVersion, errors.New("version must be positive"))
 	}
 	s.mu.Lock()
 	sent := s.sentGap[sub] == v
 	s.mu.Unlock()
 	if !sent {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d was never sent on %q", v, sub))
+		return nil, keyed(connect.CodeFailedPrecondition, keyGapUnsent, fmt.Errorf("gap version %d was never sent on %q", v, sub))
 	}
 	current, err := s.st.ClearGap(ctx, sub, v)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 	}
 	if !current {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("gap version %d of %q is not current: reconnect", v, sub))
+		return nil, keyed(connect.CodeFailedPrecondition, keyGapStale, fmt.Errorf("gap version %d of %q is not current: reconnect", v, sub))
 	}
 	return connect.NewResponse(&bridgev1.ConfirmGapResponse{}), nil
 }
@@ -546,7 +546,7 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 	n, err := s.st.Fail(ctx, sub)
 	if err != nil {
 		st.done <- outcome{delay: RetryBase}
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 	}
 	if n < MaxAttempts {
 		st.done <- outcome{delay: RetryBase << (n - 1)}
@@ -563,7 +563,7 @@ func (s *Server) Nack(ctx context.Context, req *connect.Request[bridgev1.NackReq
 	}
 	if err := s.st.DeadLetter(ctx, sub, e, fmt.Sprintf("%d attempts: %s", n, reason)); err != nil {
 		st.done <- outcome{delay: RetryBase}
-		return nil, connect.NewError(connect.CodeUnavailable, err)
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourcePostgres, err)
 	}
 	st.done <- outcome{advanced: true}
 	return connect.NewResponse(&bridgev1.NackResponse{}), nil
@@ -587,10 +587,10 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 		return unavailable(ctx, err)
 	}
 	if !found {
-		return connect.NewError(connect.CodeNotFound, fmt.Errorf("no subscription %q", sub))
+		return keyed(connect.CodeNotFound, keyNoSub, fmt.Errorf("no subscription %q", sub))
 	}
 	if !c.mayRead(types, subjects) {
-		return connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s may no longer read %q's filter", c.Name, sub))
+		return keyed(connect.CodePermissionDenied, keyFilterRevoked, fmt.Errorf("%s may no longer read %q's filter", c.Name, sub))
 	}
 	head, err := s.st.Head(ctx)
 	if err != nil {
