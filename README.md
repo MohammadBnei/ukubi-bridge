@@ -102,7 +102,8 @@ ago (default 30 days), by `ingested_at`, never by the publisher's `time`
 - A dead letter is never recorded for an event already deleted.
 - Each subject left parked for 3 days is logged once per run (`dead letter
   uncleared`), and a failed run logs one `retention failed` line: the chart's
-  Loki rules alert on both.
+  Loki rules alert on both, matching those words. The bridge logs one JSON
+  object per line on stdout (time, level, msg, attributes).
 
 The run locks `dead_letters` for its duration, so an unparking `UPDATE` or a
 live dead-lettering waits for it. Clients written before gaps existed must
