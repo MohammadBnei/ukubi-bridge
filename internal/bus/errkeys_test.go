@@ -341,7 +341,7 @@ func TestKeyAllWraps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, connect.WithInterceptors(keyAll{}))") {
+	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, connect.WithInterceptors(append(ics, keyAll{})...))") {
 		t.Error("Handler does not install keyAll")
 	}
 }

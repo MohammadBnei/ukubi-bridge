@@ -202,8 +202,9 @@ func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
 }
 
 // Handler mounts the service on a mux.
-func (s *Server) Handler() (string, http.Handler) {
-	return bridgev1connect.NewBridgeServiceHandler(s, connect.WithInterceptors(keyAll{}))
+// Handler is the API, with ics outermost (tracing: its span sees the keyed error) and keyAll last.
+func (s *Server) Handler(ics ...connect.Interceptor) (string, http.Handler) {
+	return bridgev1connect.NewBridgeServiceHandler(s, connect.WithInterceptors(append(ics, keyAll{})...))
 }
 
 // errGapped ends a stream whose subscription a deletion run gapped (events it

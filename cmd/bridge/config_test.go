@@ -329,3 +329,34 @@ func TestEnvUses(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigTraces: the traces endpoint is an http(s) URL with its path, or unset (no tracing).
+func TestConfigTraces(t *testing.T) {
+	for v, ok := range map[string]bool{"": true, "http://alloy.monitoring:4318/v1/traces": true, "https://x/v1/traces": true,
+		"nope": false, "http://alloy:4318": false, "http://alloy:4318/": false, "grpc://alloy:4317/v1/traces": false} {
+		c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": v}))
+		if (err == nil) != ok || (ok && c.Traces != v) {
+			t.Errorf("%q: %v %q", v, err, c.Traces)
+		}
+		if err != nil && (err.msg != "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces)" || fmtArgs(err.args) != "[value "+v+"]") {
+			t.Errorf("%q: %q %s", v, err.msg, fmtArgs(err.args))
+		}
+	}
+}
+
+// TestTracedWiring: main traces the API (its interceptors) and every webhook route (route wraps each).
+func TestTracedWiring(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"api.Handler(tel.Interceptors()...)", `route("POST /webhook/github",`, `route("POST /webhook/alertmanager",`,
+		`route("POST /webhook/grafana",`, "mux.Handle(pattern, tel.Handler(pattern, h))"} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("main.go: no %s", want)
+		}
+	}
+	if strings.Count(string(src), `mux.Handle("POST /webhook`) != 0 {
+		t.Error("a webhook route registered untraced")
+	}
+}

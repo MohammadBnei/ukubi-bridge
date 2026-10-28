@@ -18,6 +18,7 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
+	"github.com/MohammadBnei/ukubi-bridge/internal/telemetry"
 )
 
 func main() {
@@ -61,13 +62,19 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.Handle("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
+	tel, err := telemetry.New(cfg.Traces, "ukubi-bridge")
+	if err != nil {
+		slog.Error("traces", "err", err)
+		os.Exit(1)
+	}
+	route := func(pattern string, h http.Handler) { mux.Handle(pattern, tel.Handler(pattern, h)) }
+	route("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
 	api := bus.New(st, clients, tokens)
-	mux.Handle(api.Handler())
+	mux.Handle(api.Handler(tel.Interceptors()...))
 
 	// Unset token: both answer 503 rather than serve open.
-	mux.Handle("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.Insert))
-	mux.Handle("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.Insert))
+	route("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.Insert))
+	route("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.Insert))
 
 	if cfg.OIDC.JWKSURL != "" {
 		go tokens.Watch(ctx, cfg.OIDC.JWKSURL, &http.Client{Timeout: 10 * time.Second}, time.Hour)
@@ -105,6 +112,9 @@ func main() {
 	// ListenAndServe returns as soon as Shutdown starts; wait for in-flight
 	// handlers before the deferred st.Close.
 	<-shutdownDone
+	if err := tel.Shutdown(); err != nil {
+		slog.Warn("traces", "err", err)
+	}
 }
 
 // maxBody caps a /webhook/github body (see githubHandler).

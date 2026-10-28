@@ -207,6 +207,7 @@ The webhook endpoints answer GitHub, Alertmanager and Grafana in plain text, by 
 | `BRIDGE_RETENTION` | Go duration, default `720h` (30 days), at least `24h`. Keep it longer than `BRIDGE_RECONCILE_LOOKBACK` and than the longest consumer outage you accept. |
 | `PORT` | Default `8080`. |
 | `BRIDGE_CLIENTS` | Retired (ADR-0066): ignored, with a warning at start, until the rollout drops it from the Secret. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional. The OTLP/HTTP traces URL in full (`…/v1/traces`): a span per API call and webhook route. Unset: no tracing. The SDK's other `OTEL_*` variables (resource attributes, the exporter's headers, timeout, certificates) are its own. |
 
 ## Tests
 
