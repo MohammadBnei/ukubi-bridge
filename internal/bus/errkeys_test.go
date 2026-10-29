@@ -1,7 +1,11 @@
 package bus
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -20,6 +24,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/MohammadBnei/ukubi-go/errs/connectkeys"
 	errorsv1 "github.com/MohammadBnei/ukubi-go/proto/gen/go/ukubi/errors/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
@@ -456,5 +461,90 @@ func TestHandlerFallback(t *testing.T) {
 	}
 	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, withInterceptors(ics...))") {
 		t.Error("Handler does not mount the service with withInterceptors(ics...)")
+	}
+}
+
+// TestFallbackInterceptors: an interceptor inside the fallback sees the handler's error before it is keyed, and what
+// the interceptor itself returns unkeyed is keyed internal, as both details.
+func TestFallbackInterceptors(t *testing.T) {
+	var seen error
+	ic := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			_, seen = next(ctx, req)
+			return nil, errors.New("interceptor: broken")
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(bridgev1connect.NewBridgeServiceHandler(fallbackStub{err: errors.New("handler: raw")}, withInterceptors(ic)))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	_, err := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL).Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
+	if _, _, ok := keyOf(seen); ok || seen == nil || seen.Error() != "handler: raw" {
+		t.Errorf("the interceptor saw %v, want the handler's unkeyed error", seen)
+	}
+	var ce *connect.Error
+	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) || !errors.As(err, &ce) || ce.Message() != "interceptor: broken" {
+		t.Errorf("%v: key %q", err, k)
+	}
+}
+
+// wireDetail is a detail of a Connect protocol error body.
+type wireDetail struct{ Type, Value string }
+
+// TestFallbackMalformed: an unreadable unary request is refused by Connect before the handler chain, so it carries no
+// key; a stream's is read inside the chain, so it is keyed server.internal, as both details, with Connect's code.
+func TestFallbackMalformed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle(bridgev1connect.NewBridgeServiceHandler(fallbackStub{err: errors.New("unreached")}, withInterceptors()))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res, err := srv.Client().Post(srv.URL+bridgev1connect.BridgeServicePublishProcedure, "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unary struct {
+		Code    string
+		Details []wireDetail
+	}
+	if err := json.NewDecoder(res.Body).Decode(&unary); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if unary.Code != "invalid_argument" || len(unary.Details) != 0 {
+		t.Errorf("unary: %+v, want invalid_argument with no detail", unary)
+	}
+
+	env := make([]byte, 5, 6)
+	binary.BigEndian.PutUint32(env[1:], 1)
+	res, err = srv.Client().Post(srv.URL+bridgev1connect.BridgeServiceSubscribeProcedure, "application/connect+json", bytes.NewReader(append(env, '{')))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	_, _ = body.ReadFrom(res.Body)
+	_ = res.Body.Close()
+	b := body.Bytes()
+	if len(b) < 5 || b[0]&2 == 0 {
+		t.Fatalf("stream: %q, want an end-stream message", b)
+	}
+	var end struct {
+		Error struct {
+			Code    string
+			Details []wireDetail
+		}
+	}
+	if err := json.Unmarshal(b[5:], &end); err != nil {
+		t.Fatal(err)
+	}
+	ds := end.Error.Details
+	if end.Error.Code != "invalid_argument" || len(ds) != 2 || ds[0].Type != "bridge.v1.ErrorKey" ||
+		ds[1].Type != "ukubi.errors.v1.ErrorKey" || ds[0].Value != ds[1].Value {
+		t.Fatalf("stream: %+v, want invalid_argument with both details", end.Error)
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(ds[0].Value, "="))
+	var k bridgev1.ErrorKey
+	if err != nil || proto.Unmarshal(raw, &k) != nil || k.GetKey() != "server.internal" {
+		t.Errorf("stream: key %q (%v)", k.GetKey(), err)
 	}
 }
