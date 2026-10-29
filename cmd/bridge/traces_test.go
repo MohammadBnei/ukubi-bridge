@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,6 @@ import (
 // collector is an OTLP/HTTP traces receiver: the spans it was sent.
 type collector struct {
 	mu    sync.Mutex
-	names []string
 	spans []seen
 }
 
@@ -58,7 +58,6 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, ss := range rs.ScopeSpans {
 			for _, s := range ss.Spans {
-				c.names = append(c.names, s.Name)
 				sn := seen{name: s.Name, service: service, parent: len(s.ParentSpanId) > 0}
 				for _, l := range s.Links {
 					sn.links = append(sn.links, hex.EncodeToString(l.TraceId))
@@ -71,14 +70,11 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(nil)
 }
 
-func (c *collector) got() map[string]int {
+// got is a copy of the spans so far, taken under mu.
+func (c *collector) got() []seen {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	m := map[string]int{}
-	for _, n := range c.names {
-		m[n]++
-	}
-	return m
+	return slices.Clone(c.spans)
 }
 
 // TestMainTraces runs the real binary (main, in a child process) with OTEL_EXPORTER_OTLP_TRACES_ENDPOINT set: a span
@@ -189,14 +185,18 @@ func TestMainTraces(t *testing.T) {
 		"POST /webhook/github": 2, "POST /webhook/alertmanager": 1, "POST /webhook/grafana": 1,
 		"bridge.v1.BridgeService/Publish": 1, "bridge.v1.BridgeService/Subscribe": 1,
 	}
-	got := col.got()
+	spans := col.got()
+	got := map[string]int{}
+	for _, s := range spans {
+		got[s.name]++
+	}
 	for n, c := range want {
 		if got[n] != c {
 			t.Errorf("%d spans %q, want %d (all: %v)", got[n], n, c, got)
 		}
 	}
 	linked := map[string]int{}
-	for _, s := range col.spans {
+	for _, s := range spans {
 		if s.service != "ukubi-bridge" || s.parent || len(s.links) > 1 || len(s.links) == 1 && s.links[0] != caller {
 			t.Errorf("%s: service %q parent %v links %v", s.name, s.service, s.parent, s.links)
 		}

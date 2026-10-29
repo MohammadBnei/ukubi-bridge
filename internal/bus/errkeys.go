@@ -14,7 +14,7 @@ import (
 
 // Key is one of the bridge's error keys (mountain plan/15 §4): stable, carried beside Connect's code as an ErrorKey
 // detail, so a client never parses a message. The registry is closed: TestErrKeys refuses a key that is not one of
-// these constants (or of tokenKey's), an error built with Connect anywhere but here, and any use of keys or of
+// these constants (or of tokenKey's), an error built with Connect anywhere but here, and any use of connectKeys or of
 // ukubi-go's errs and connectkeys outside this file. withInterceptors keys whatever a handler returns unkeyed as
 // keyInternal (connectkeys.KeyInternal), so every error a handler returns carries one.
 type Key = errs.Key
@@ -61,16 +61,16 @@ func tokenKey(err error) Key {
 	return keyToken
 }
 
-// keys puts every key as two details with the same bytes: bridge.v1.ErrorKey, the bridge's detail since #12, first, then
+// connectKeys puts every key as two details with the same bytes: bridge.v1.ErrorKey, the bridge's detail since #12, first, then
 // ukubi.errors.v1.ErrorKey (standard §6). Its value never changes after New.
-var keys = connectkeys.New(&bridgev1.ErrorKey{}, &errorsv1.ErrorKey{})
+var connectKeys = connectkeys.New(&bridgev1.ErrorKey{}, &errorsv1.ErrorKey{})
 
 // keyed is Connect's error for code with err's words, keyed: the bridge's own words.
-func keyed(code connect.Code, key Key, err error) *connect.Error { return keys.Connect(code, key, err) }
+func keyed(code connect.Code, key Key, err error) *connect.Error { return connectKeys.Connect(code, key, err) }
 
 // sourced is keyed with the source whose words err holds.
 func sourced(code connect.Code, key Key, source string, err error) *connect.Error {
-	return keys.Sourced(code, key, source, err)
+	return connectKeys.Sourced(code, key, source, err)
 }
 
 // withInterceptors is the API handler's option: ics, inside connectkeys' fallback, which keys anything a handler or
@@ -78,5 +78,5 @@ func sourced(code connect.Code, key Key, source string, err error) *connect.Erro
 // An unreadable unary request or an unknown procedure carries no key: Connect refuses it before the handler runs. A
 // stream's unreadable request is read inside the handler chain, so it is keyed server.internal, with Connect's code.
 func withInterceptors(ics ...connect.Interceptor) connect.HandlerOption {
-	return keys.WithInterceptors(ics...)
+	return connectKeys.WithInterceptors(ics...)
 }

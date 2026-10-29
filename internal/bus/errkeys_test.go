@@ -101,9 +101,9 @@ func registry(t *testing.T) map[string]string {
 // keyProblems checks one file of the package: an error or an error detail is built with Connect (NewError,
 // NewWireError, NewErrorDetail, under whatever name connect is imported) only in errkeys.go; keyed and sourced take a
 // key named directly from the registry or one of errkeys.go's key functions (keyFuncs), and sourced the one source
-// constant; Key is never written outside errkeys.go (no conversion, no new constant); the identifier keys (the
-// connectkeys.Keys, in any use: a call, an alias, a field) and ukubi-go's errs, connectkeys and ukubi.errors.v1
-// packages appear only in errkeys.go. It returns the problems and how many keyed/sourced calls it checked.
+// constant; Key is never written outside errkeys.go (no conversion, no new constant); the identifier connectKeys (the
+// connectkeys.Keys, in any use: a call, an alias, a field; a name only it takes, so a local keys is free) and
+// ukubi-go's errs, connectkeys and ukubi.errors.v1 packages appear only in errkeys.go. It returns the problems and how many keyed/sourced calls it checked.
 func keyProblems(name string, src []byte, keys map[string]string, keyFuncs map[string]bool) (problems []string, checked int) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.SkipObjectResolution)
 	if err != nil {
@@ -135,8 +135,8 @@ func keyProblems(name string, src []byte, keys map[string]string, keyFuncs map[s
 				problems = append(problems, "connect."+x.Sel.Name+" outside errkeys.go")
 			}
 		case *ast.Ident:
-			if x.Name == "keys" && !registryFile {
-				problems = append(problems, "keys outside errkeys.go")
+			if x.Name == "connectKeys" && !registryFile {
+				problems = append(problems, "connectKeys outside errkeys.go")
 			}
 		case *ast.CallExpr:
 			fn, ok := x.Fun.(*ast.Ident)
@@ -232,23 +232,24 @@ func TestErrKeys(t *testing.T) {
 func TestErrKeysForms(t *testing.T) {
 	keys, fns := map[string]string{"keyA": "a.b"}, map[string]bool{"keyOf": true}
 	for src, want := range map[string]int{
-		`keyed(connect.CodeInternal, keyA, nil)`:                     0,
-		`keyed(connect.CodeInternal, keyOf(nil), nil)`:               0,
-		`keyed(connect.CodeInternal, other(nil), nil)`:               1,
-		`sourced(connect.CodeInternal, keyA, sourceStore, nil)`:      0,
-		`sourced(connect.CodeInternal, keyA, "pg", nil)`:             1,
-		`connect.NewWireError(connect.CodeInternal, nil)`:            1,
-		`keyed(connect.CodeInternal, keyB, nil)`:                     1,
-		`keyed(connect.CodeInternal, "a.b", nil)`:                    1,
-		`keyed(connect.CodeInternal, Key("a.b"), nil)`:               2,
-		`connect.NewError(connect.CodeInternal, nil)`:                1,
-		`func() { const keyC Key = "c.d"; _ = keyed(0, keyC, nil) }`: 2,
-		`keys.Connect(connect.CodeInternal, keyA, nil)`:              1,
-		`keys.Sourced(connect.CodeInternal, keyA, sourceStore, nil)`: 1,
-		`keys.Status(0, keyA, "x")`:                                  1,
-		`keys.WithInterceptors()`:                                    1,
-		`func() { k := keys; _ = k.Connect(0, keyA, nil) }`:          1,
-		`connect.NewErrorDetail(nil)`:                                1,
+		`keyed(connect.CodeInternal, keyA, nil)`:                            0,
+		`keyed(connect.CodeInternal, keyOf(nil), nil)`:                      0,
+		`keyed(connect.CodeInternal, other(nil), nil)`:                      1,
+		`sourced(connect.CodeInternal, keyA, sourceStore, nil)`:             0,
+		`sourced(connect.CodeInternal, keyA, "pg", nil)`:                    1,
+		`connect.NewWireError(connect.CodeInternal, nil)`:                   1,
+		`keyed(connect.CodeInternal, keyB, nil)`:                            1,
+		`keyed(connect.CodeInternal, "a.b", nil)`:                           1,
+		`keyed(connect.CodeInternal, Key("a.b"), nil)`:                      2,
+		`connect.NewError(connect.CodeInternal, nil)`:                       1,
+		`func() { const keyC Key = "c.d"; _ = keyed(0, keyC, nil) }`:        2,
+		`connectKeys.Connect(connect.CodeInternal, keyA, nil)`:              1,
+		`connectKeys.Sourced(connect.CodeInternal, keyA, sourceStore, nil)`: 1,
+		`connectKeys.Status(0, keyA, "x")`:                                  1,
+		`connectKeys.WithInterceptors()`:                                    1,
+		`func() { keys := []string{}; _ = keys }`:                           0,
+		`func() { k := connectKeys; _ = k.Connect(0, keyA, nil) }`:          1,
+		`connect.NewErrorDetail(nil)`:                                       1,
 	} {
 		p, _ := keyProblems("x.go", []byte("package bus\nimport \"connectrpc.com/connect\"\nvar _ = "+src+"\n"), keys, fns)
 		if len(p) != want {
@@ -263,7 +264,7 @@ func TestErrKeysForms(t *testing.T) {
 		if p, _ := keyProblems("x.go", []byte("package bus\nimport "+im+"\n"), keys, fns); len(p) != 1 {
 			t.Errorf("%s: %v, want 1 problem", im, p)
 		}
-		if p, _ := keyProblems("errkeys.go", []byte("package bus\nimport "+im+"\nvar _ = keys.Connect\n"), keys, fns); len(p) != 0 {
+		if p, _ := keyProblems("errkeys.go", []byte("package bus\nimport "+im+"\nvar _ = connectKeys.Connect\n"), keys, fns); len(p) != 0 {
 			t.Errorf("%s in errkeys.go: %v", im, p) // the positive control: the registry file may
 		}
 	}
@@ -456,11 +457,11 @@ func TestFallback(t *testing.T) {
 // TestHandlerFallback: the real Server.Handler puts the key fallback outside every interceptor it is given: an
 // interceptor sees an unkeyed error, and the client gets it keyed server.internal, as both details.
 func TestHandlerFallback(t *testing.T) {
-	var seen error
+	seenc := make(chan error, 1) // the server's goroutine hands what it saw to the test's
 	record := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
 			res, err := next(ctx, req)
-			seen = err
+			seenc <- err
 			return res, err
 		}
 	})
@@ -474,35 +475,19 @@ func TestHandlerFallback(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	_, err := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL).Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
-	if _, _, ok := keyOf(seen); ok || seen == nil || seen.Error() != "inner: raw" {
-		t.Errorf("the recording interceptor saw %v, want the unkeyed error", seen)
-	}
-	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) {
-		t.Errorf("%v: key %q, want server.internal as both details", err, k)
-	}
-}
-
-// TestFallbackInterceptors: an interceptor inside the fallback sees the handler's error before it is keyed, and what
-// the interceptor itself returns unkeyed is keyed internal, as both details.
-func TestFallbackInterceptors(t *testing.T) {
 	var seen error
-	ic := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			_, seen = next(ctx, req)
-			return nil, errors.New("interceptor: broken")
-		}
-	})
-	mux := http.NewServeMux()
-	mux.Handle(bridgev1connect.NewBridgeServiceHandler(fallbackStub{err: errors.New("handler: raw")}, withInterceptors(ic)))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	_, err := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL).Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
-	if _, _, ok := keyOf(seen); ok || seen == nil || seen.Error() != "handler: raw" {
-		t.Errorf("the interceptor saw %v, want the handler's unkeyed error", seen)
+	select { // sent before the response was written; nil if the interceptor never ran
+	case seen = <-seenc:
+	default:
+	}
+	if seen == nil || seen.Error() != "inner: raw" {
+		t.Errorf("the recording interceptor saw %v, want the unkeyed error", seen)
+	} else if _, _, ok := keyOf(seen); ok {
+		t.Errorf("the recording interceptor saw %v keyed, want it unkeyed", seen)
 	}
 	var ce *connect.Error
-	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) || !errors.As(err, &ce) || ce.Message() != "interceptor: broken" {
-		t.Errorf("%v: key %q", err, k)
+	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) || !errors.As(err, &ce) || ce.Message() != "inner: raw" {
+		t.Errorf("%v: key %q, want server.internal as both details, with the interceptor's words", err, k)
 	}
 }
 

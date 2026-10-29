@@ -160,9 +160,9 @@ An unreadable unary request, an unknown procedure or a client's own timeout carr
 handler runs. A stream's (Subscribe, Replay) unreadable request is keyed `server.internal`, with Connect's code.
 
 The key rides twice, as two details with the same fields and the same value bytes: `bridge.v1.ErrorKey` first, then
-`ukubi.errors.v1.ErrorKey` (from ukubi-go, the shared name; standard §6). A client reads either; each skips a detail
-it does not know. In the Connect protocol's error body (JSON, whatever the codec) each is a `{type, value, debug}`
-entry of `details`; over gRPC and gRPC-Web, an `Any` in `grpc-status-details-bin`. `bridge.v1.ErrorKey` goes only once no client reads it.
+`ukubi.errors.v1.ErrorKey` (from ukubi-go, the shared name; standard §6). A client reads either, by its type, not
+its position (an error the fallback keys may carry other details between them); each skips a detail it does not know.
+In the Connect protocol's error body (JSON, whatever the codec) each is a `{type, value, debug}` entry of `details`; over gRPC and gRPC-Web, an `Any` in `grpc-status-details-bin`. `bridge.v1.ErrorKey` goes only once no client reads it.
 The keys and the fallback that keys an unkeyed error `server.internal` are ukubi-go's `errs/connectkeys`, installed
 outermost. The registry is closed, in `internal/bus/errkeys.go`:
 
