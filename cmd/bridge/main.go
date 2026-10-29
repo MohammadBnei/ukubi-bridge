@@ -14,12 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MohammadBnei/ukubi-go/telemetry"
+
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
-	"github.com/MohammadBnei/ukubi-bridge/internal/telemetry"
 )
 
 func main() {

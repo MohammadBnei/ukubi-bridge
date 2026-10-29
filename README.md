@@ -156,8 +156,15 @@ Once cleared, the next retention run deletes those events if they are old.
 Every error a BridgeService handler returns carries Connect's code, the same words as before, and an
 `ErrorKey {key, source}` detail (mountain plan/15 §4): a client branches on the code and the key, never on the
 message. `source` is `store` when the message is the store's words (pgx's or Postgres's), empty for the bridge's.
-Errors Connect raises before a handler runs (an unreadable body, an unknown procedure, a client's own timeout) carry
-no key. The registry is closed, in `internal/bus/errkeys.go`:
+An unreadable unary request, an unknown procedure or a client's own timeout carries no key: Connect raises it before a
+handler runs. A stream's (Subscribe, Replay) unreadable request is keyed `server.internal`, with Connect's code.
+
+The key rides twice, as two details with the same fields and the same value bytes: `bridge.v1.ErrorKey` first, then
+`ukubi.errors.v1.ErrorKey` (from ukubi-go, the shared name; standard §6). A client reads either; each skips a detail
+it does not know. In the Connect protocol's error body (JSON, whatever the codec) each is a `{type, value, debug}`
+entry of `details`; over gRPC and gRPC-Web, an `Any` in `grpc-status-details-bin`. `bridge.v1.ErrorKey` goes only once no client reads it.
+The keys and the fallback that keys an unkeyed error `server.internal` are ukubi-go's `errs/connectkeys`, installed
+outermost. The registry is closed, in `internal/bus/errkeys.go`:
 
 | Key | Meaning |
 |---|---|

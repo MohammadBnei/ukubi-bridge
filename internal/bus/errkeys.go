@@ -1,11 +1,12 @@
 package bus
 
 import (
-	"context"
 	"errors"
-	"os"
 
 	"connectrpc.com/connect"
+	"github.com/MohammadBnei/ukubi-go/errs"
+	"github.com/MohammadBnei/ukubi-go/errs/connectkeys"
+	errorsv1 "github.com/MohammadBnei/ukubi-go/proto/gen/go/ukubi/errors/v1"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	bridgev1 "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1"
@@ -13,9 +14,10 @@ import (
 
 // Key is one of the bridge's error keys (mountain plan/15 §4): stable, carried beside Connect's code as an ErrorKey
 // detail, so a client never parses a message. The registry is closed: TestErrKeys refuses a key that is not one of
-// these constants (or of tokenKey's), and an error built with Connect anywhere but here. keyAll keys whatever a
-// handler returns unkeyed as keyInternal, so every error a handler returns carries one.
-type Key string
+// these constants (or of tokenKey's), an error built with Connect anywhere but here, and any use of keys or of
+// ukubi-go's errs and connectkeys outside this file. withInterceptors keys whatever a handler returns unkeyed as
+// keyInternal (connectkeys.KeyInternal), so every error a handler returns carries one.
+type Key = errs.Key
 
 const (
 	keyBearer        Key = "auth.bearer_required"
@@ -59,91 +61,22 @@ func tokenKey(err error) Key {
 	return keyToken
 }
 
+// keys puts every key as two details with the same bytes: bridge.v1.ErrorKey, the bridge's detail since #12, first, then
+// ukubi.errors.v1.ErrorKey (standard §6). Its value never changes after New.
+var keys = connectkeys.New(&bridgev1.ErrorKey{}, &errorsv1.ErrorKey{})
+
 // keyed is Connect's error for code with err's words, keyed: the bridge's own words.
-func keyed(code connect.Code, key Key, err error) *connect.Error { return sourced(code, key, "", err) }
+func keyed(code connect.Code, key Key, err error) *connect.Error { return keys.Connect(code, key, err) }
 
 // sourced is keyed with the source whose words err holds.
 func sourced(code connect.Code, key Key, source string, err error) *connect.Error {
-	e := connect.NewError(code, err)
-	addKey(e, key, source)
-	return e
+	return keys.Sourced(code, key, source, err)
 }
 
-func addKey(e *connect.Error, key Key, source string) {
-	d, err := connect.NewErrorDetail(&bridgev1.ErrorKey{Key: string(key), Source: source})
-	if err != nil {
-		panic(err) // a two-string message always marshals
-	}
-	e.AddDetail(d)
-}
-
-// hasKey: err is a Connect error that already carries an ErrorKey.
-func hasKey(err error) bool {
-	var ce *connect.Error
-	if !errors.As(err, &ce) {
-		return false
-	}
-	for _, d := range ce.Details() {
-		if d.Type() == "bridge.v1.ErrorKey" {
-			return true
-		}
-	}
-	return false
-}
-
-// keyAll keys an error a handler returns without one (a raw Send failure, a path that forgot) as keyInternal,
-// keeping its code and words, on a copy (the handler's own error is never changed): every error a handler returns
-// carries a key. Errors Connect raises before the handler runs (an unreadable body, an unknown procedure) carry none.
-type keyAll struct{}
-
-func (keyAll) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
-	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		res, err := next(ctx, req)
-		return res, withKey(err)
-	}
-}
-
-func (keyAll) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
-	return next
-}
-
-func (keyAll) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
-	return func(ctx context.Context, conn connect.StreamingHandlerConn) error { return withKey(next(ctx, conn)) }
-}
-
-func withKey(err error) error {
-	if err == nil || hasKey(err) {
-		return err
-	}
-	var ce *connect.Error
-	if !errors.As(err, &ce) {
-		e := connect.NewError(plainCode(err), err) // a plain error: the code Connect would send for it
-		addKey(e, keyInternal, "")
-		return e
-	}
-	// A copy, never ce itself: a handler may return a shared sentinel, which adding to would race across requests and
-	// stay keyed for in-process callers. Meta() makes the map on its first call, a write: so read a struct copy of ce,
-	// whose Meta() makes it on the copy only.
-	src := *ce
-	e := connect.NewError(src.Code(), src.Unwrap())
-	for _, d := range src.Details() {
-		e.AddDetail(d)
-	}
-	for k, v := range src.Meta() {
-		e.Meta()[k] = append([]string(nil), v...)
-	}
-	addKey(e, keyInternal, "")
-	return e
-}
-
-// plainCode is the code Connect sends for a plain error (its toWire, wrapIfContextError): a context error's own,
-// wrapped or not, else Unknown.
-func plainCode(err error) connect.Code {
-	switch {
-	case errors.Is(err, context.Canceled):
-		return connect.CodeCanceled
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
-		return connect.CodeDeadlineExceeded
-	}
-	return connect.CodeUnknown
+// withInterceptors is the API handler's option: ics, inside connectkeys' fallback, which keys anything a handler or
+// any of ics returns without a key as keyInternal on a copy, keeping its code and words (a context error's own code).
+// An unreadable unary request or an unknown procedure carries no key: Connect refuses it before the handler runs. A
+// stream's unreadable request is read inside the handler chain, so it is keyed server.internal, with Connect's code.
+func withInterceptors(ics ...connect.Interceptor) connect.HandlerOption {
+	return keys.WithInterceptors(ics...)
 }
