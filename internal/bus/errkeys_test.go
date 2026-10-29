@@ -453,14 +453,32 @@ func TestFallback(t *testing.T) {
 	}
 }
 
-// TestHandlerFallback: Handler mounts the service with the option TestFallback checks.
+// TestHandlerFallback: the real Server.Handler puts the key fallback outside every interceptor it is given: an
+// interceptor sees an unkeyed error, and the client gets it keyed server.internal, as both details.
 func TestHandlerFallback(t *testing.T) {
-	src, err := os.ReadFile("bus.go")
-	if err != nil {
-		t.Fatal(err)
+	var seen error
+	record := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			res, err := next(ctx, req)
+			seen = err
+			return res, err
+		}
+	})
+	raw := connect.UnaryInterceptorFunc(func(connect.UnaryFunc) connect.UnaryFunc {
+		return func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+			return nil, errors.New("inner: raw")
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(New(nil, nil, nil).Handler(record, raw)) // raw never calls next: no store is reached
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	_, err := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL).Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
+	if _, _, ok := keyOf(seen); ok || seen == nil || seen.Error() != "inner: raw" {
+		t.Errorf("the recording interceptor saw %v, want the unkeyed error", seen)
 	}
-	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, withInterceptors(ics...))") {
-		t.Error("Handler does not mount the service with withInterceptors(ics...)")
+	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) {
+		t.Errorf("%v: key %q, want server.internal as both details", err, k)
 	}
 }
 

@@ -135,7 +135,9 @@ message ReplayResponse {
 // (internal/bus/errkeys.go, listed in README.md), which a client branches on
 // beside the code, and the source whose words the message holds ("" for the
 // bridge's own, "store" for pgx's or Postgres's). Messages are for people and
-// may change; keys do not.
+// may change; keys do not. The same bytes also ride as a second detail,
+// ukubi.errors.v1.ErrorKey (ukubi-go, the shared name), right after this one;
+// this message is kept for existing clients and slated for removal (README.md).
 message ErrorKey {
   string key = 1;
   string source = 2;
