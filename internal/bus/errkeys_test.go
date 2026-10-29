@@ -1,12 +1,18 @@
 package bus
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,10 +22,14 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/MohammadBnei/ukubi-go/errs/connectkeys"
+	errorsv1 "github.com/MohammadBnei/ukubi-go/proto/gen/go/ukubi/errors/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	bridgev1 "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1"
+	"github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1/bridgev1connect"
 )
 
 // keyOf is the ErrorKey an error carries, as a client reads it.
@@ -36,6 +46,27 @@ func keyOf(err error) (key, source string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// twinned: err's bridge.v1.ErrorKey detail is followed by a ukubi.errors.v1.ErrorKey one with the same bytes, as a
+// client of either name reads it (standard §6: both, the old one first).
+func twinned(err error) bool {
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		return false
+	}
+	ds := ce.Details()
+	for i, d := range ds {
+		if d.Type() == "bridge.v1.ErrorKey" {
+			if i+1 == len(ds) || ds[i+1].Type() != "ukubi.errors.v1.ErrorKey" || string(ds[i+1].Bytes()) != string(d.Bytes()) {
+				return false
+			}
+			v, err := ds[i+1].Value()
+			_, isKey := v.(*errorsv1.ErrorKey)
+			return err == nil && isKey
+		}
+	}
+	return false
 }
 
 // registry is errkeys.go's Key constants: name -> value.
@@ -67,11 +98,12 @@ func registry(t *testing.T) map[string]string {
 	return keys
 }
 
-// keyProblems checks one file of the package: an error is built with Connect (NewError, NewWireError, under
-// whatever name connect is imported) only in errkeys.go; keyed and sourced take a key named directly from the
-// registry or one of errkeys.go's key functions (keyFuncs), and sourced the one source constant; Key is never written
-// outside errkeys.go (no conversion, no new constant). It returns the problems and how many keyed/sourced calls it
-// checked.
+// keyProblems checks one file of the package: an error or an error detail is built with Connect (NewError,
+// NewWireError, NewErrorDetail, under whatever name connect is imported) only in errkeys.go; keyed and sourced take a
+// key named directly from the registry or one of errkeys.go's key functions (keyFuncs), and sourced the one source
+// constant; Key is never written outside errkeys.go (no conversion, no new constant); the identifier connectKeys (the
+// connectkeys.Keys, in any use: a call, an alias, a field; a name only it takes, so a local keys is free) and
+// ukubi-go's errs, connectkeys and ukubi.errors.v1 packages appear only in errkeys.go. It returns the problems and how many keyed/sourced calls it checked.
 func keyProblems(name string, src []byte, keys map[string]string, keyFuncs map[string]bool) (problems []string, checked int) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.SkipObjectResolution)
 	if err != nil {
@@ -80,7 +112,12 @@ func keyProblems(name string, src []byte, keys map[string]string, keyFuncs map[s
 	registryFile := filepath.Base(name) == "errkeys.go"
 	connectName := ""
 	for _, im := range f.Imports {
-		if p, _ := strconv.Unquote(im.Path.Value); p == "connectrpc.com/connect" {
+		p, _ := strconv.Unquote(im.Path.Value)
+		if (p == "github.com/MohammadBnei/ukubi-go/errs" || p == "github.com/MohammadBnei/ukubi-go/errs/connectkeys" ||
+			p == "github.com/MohammadBnei/ukubi-go/proto/gen/go/ukubi/errors/v1") && !registryFile {
+			problems = append(problems, "an import of "+p+" outside errkeys.go")
+		}
+		if p == "connectrpc.com/connect" {
 			connectName = "connect"
 			if im.Name != nil {
 				connectName = im.Name.Name
@@ -93,8 +130,13 @@ func keyProblems(name string, src []byte, keys map[string]string, keyFuncs map[s
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok && connectName != "" && id.Name == connectName && (x.Sel.Name == "NewError" || x.Sel.Name == "NewWireError") && !registryFile {
+			if id, ok := x.X.(*ast.Ident); ok && connectName != "" && id.Name == connectName && !registryFile &&
+				(x.Sel.Name == "NewError" || x.Sel.Name == "NewWireError" || x.Sel.Name == "NewErrorDetail") {
 				problems = append(problems, "connect."+x.Sel.Name+" outside errkeys.go")
+			}
+		case *ast.Ident:
+			if x.Name == "connectKeys" && !registryFile {
+				problems = append(problems, "connectKeys outside errkeys.go")
 			}
 		case *ast.CallExpr:
 			fn, ok := x.Fun.(*ast.Ident)
@@ -190,17 +232,24 @@ func TestErrKeys(t *testing.T) {
 func TestErrKeysForms(t *testing.T) {
 	keys, fns := map[string]string{"keyA": "a.b"}, map[string]bool{"keyOf": true}
 	for src, want := range map[string]int{
-		`keyed(connect.CodeInternal, keyA, nil)`:                     0,
-		`keyed(connect.CodeInternal, keyOf(nil), nil)`:               0,
-		`keyed(connect.CodeInternal, other(nil), nil)`:               1,
-		`sourced(connect.CodeInternal, keyA, sourceStore, nil)`:      0,
-		`sourced(connect.CodeInternal, keyA, "pg", nil)`:             1,
-		`connect.NewWireError(connect.CodeInternal, nil)`:            1,
-		`keyed(connect.CodeInternal, keyB, nil)`:                     1,
-		`keyed(connect.CodeInternal, "a.b", nil)`:                    1,
-		`keyed(connect.CodeInternal, Key("a.b"), nil)`:               2,
-		`connect.NewError(connect.CodeInternal, nil)`:                1,
-		`func() { const keyC Key = "c.d"; _ = keyed(0, keyC, nil) }`: 2,
+		`keyed(connect.CodeInternal, keyA, nil)`:                            0,
+		`keyed(connect.CodeInternal, keyOf(nil), nil)`:                      0,
+		`keyed(connect.CodeInternal, other(nil), nil)`:                      1,
+		`sourced(connect.CodeInternal, keyA, sourceStore, nil)`:             0,
+		`sourced(connect.CodeInternal, keyA, "pg", nil)`:                    1,
+		`connect.NewWireError(connect.CodeInternal, nil)`:                   1,
+		`keyed(connect.CodeInternal, keyB, nil)`:                            1,
+		`keyed(connect.CodeInternal, "a.b", nil)`:                           1,
+		`keyed(connect.CodeInternal, Key("a.b"), nil)`:                      2,
+		`connect.NewError(connect.CodeInternal, nil)`:                       1,
+		`func() { const keyC Key = "c.d"; _ = keyed(0, keyC, nil) }`:        2,
+		`connectKeys.Connect(connect.CodeInternal, keyA, nil)`:              1,
+		`connectKeys.Sourced(connect.CodeInternal, keyA, sourceStore, nil)`: 1,
+		`connectKeys.Status(0, keyA, "x")`:                                  1,
+		`connectKeys.WithInterceptors()`:                                    1,
+		`func() { keys := []string{}; _ = keys }`:                           0,
+		`func() { k := connectKeys; _ = k.Connect(0, keyA, nil) }`:          1,
+		`connect.NewErrorDetail(nil)`:                                       1,
 	} {
 		p, _ := keyProblems("x.go", []byte("package bus\nimport \"connectrpc.com/connect\"\nvar _ = "+src+"\n"), keys, fns)
 		if len(p) != want {
@@ -210,6 +259,22 @@ func TestErrKeysForms(t *testing.T) {
 	if p, _ := keyProblems("x.go", []byte("package bus\nimport cx \"connectrpc.com/connect\"\nvar _ = cx.NewError(0, nil)\n"), keys, fns); len(p) != 1 {
 		t.Errorf("an aliased import: %v", p)
 	}
+	for _, im := range []string{`"github.com/MohammadBnei/ukubi-go/errs"`, `ck "github.com/MohammadBnei/ukubi-go/errs/connectkeys"`,
+		`ev1 "github.com/MohammadBnei/ukubi-go/proto/gen/go/ukubi/errors/v1"`} {
+		if p, _ := keyProblems("x.go", []byte("package bus\nimport "+im+"\n"), keys, fns); len(p) != 1 {
+			t.Errorf("%s: %v, want 1 problem", im, p)
+		}
+		if p, _ := keyProblems("errkeys.go", []byte("package bus\nimport "+im+"\nvar _ = connectKeys.Connect\n"), keys, fns); len(p) != 0 {
+			t.Errorf("%s in errkeys.go: %v", im, p) // the positive control: the registry file may
+		}
+	}
+}
+
+// TestKeyInternal: the registry's keyInternal is the key connectkeys' fallback puts.
+func TestKeyInternal(t *testing.T) {
+	if keyInternal != connectkeys.KeyInternal {
+		t.Errorf("%q, connectkeys puts %q", keyInternal, connectkeys.KeyInternal)
+	}
 }
 
 // TestKeyed: the code and words are Connect's as before; the key and source ride as the detail.
@@ -218,11 +283,12 @@ func TestKeyed(t *testing.T) {
 	if e.Code() != connect.CodeUnavailable || e.Message() != "conn refused" {
 		t.Errorf("%v %q", e.Code(), e.Message())
 	}
-	if k, s, ok := keyOf(e); !ok || k != "store.unavailable" || s != "store" {
-		t.Errorf("key %q source %q %v", k, s, ok)
+	if k, s, ok := keyOf(e); !ok || k != "store.unavailable" || s != "store" || !twinned(e) {
+		t.Errorf("key %q source %q %v twinned %v", k, s, ok, twinned(e))
 	}
-	if k, s, ok := keyOf(keyed(connect.CodeAborted, keyGapped, errGapped)); !ok || k != "stream.gapped" || s != "" {
-		t.Errorf("key %q source %q %v", k, s, ok)
+	g := keyed(connect.CodeAborted, keyGapped, errGapped)
+	if k, s, ok := keyOf(g); !ok || k != "stream.gapped" || s != "" || !twinned(g) || len(g.Details()) != 2 {
+		t.Errorf("key %q source %q %v twinned %v", k, s, ok, twinned(g))
 	}
 }
 
@@ -272,8 +338,8 @@ func TestWireKeys(t *testing.T) {
 		k, _, ok := keyOf(c.err)
 		var ce *connect.Error
 		errors.As(c.err, &ce)
-		if !ok || k != c.key || connect.CodeOf(c.err) != c.code || ce == nil || ce.Message() != c.msg {
-			t.Errorf("%s: %v key %q", c.name, c.err, k)
+		if !ok || k != c.key || connect.CodeOf(c.err) != c.code || ce == nil || ce.Message() != c.msg || !twinned(c.err) {
+			t.Errorf("%s: %v key %q twinned %v", c.name, c.err, k, twinned(c.err))
 		}
 	}
 }
@@ -307,106 +373,181 @@ func TestTokenKey(t *testing.T) {
 	}
 }
 
-// TestKeyAll: what a handler returns without a key leaves keyed internal, with its code and words; a keyed error
-// keeps its own key; nil stays nil.
-func TestKeyAll(t *testing.T) {
-	plain := withKey(errors.New("send: broken pipe"))
-	if k, _, ok := keyOf(plain); !ok || k != "server.internal" || connect.CodeOf(plain) != connect.CodeUnknown || !strings.Contains(plain.Error(), "send: broken pipe") {
-		t.Errorf("plain: %v key %q", plain, k)
-	}
-	bare := withKey(connect.NewError(connect.CodeResourceExhausted, errors.New("too big")))
-	if k, _, ok := keyOf(bare); !ok || k != "server.internal" || connect.CodeOf(bare) != connect.CodeResourceExhausted {
-		t.Errorf("bare: %v key %q", bare, k)
-	}
-	own := withKey(keyed(connect.CodeAborted, keyGapped, errGapped))
-	var ce *connect.Error
-	if k, _, _ := keyOf(own); k != "stream.gapped" || !errors.As(own, &ce) || len(ce.Details()) != 1 {
-		t.Errorf("own: key %q", k) // the positive control: a keyed error is left alone, one detail
-	}
-	if withKey(nil) != nil {
-		t.Error("nil became an error")
-	}
+// fallbackStub answers Publish and Subscribe with err, whatever it is.
+type fallbackStub struct {
+	bridgev1connect.UnimplementedBridgeServiceHandler
+	err error
 }
 
-// TestKeyAllWraps: both of keyAll's handler wrappers key a raw error, and Handler installs keyAll.
-func TestKeyAllWraps(t *testing.T) {
-	raw := errors.New("raw")
-	unary := keyAll{}.WrapUnary(func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) { return nil, raw })
-	if _, err := unary(context.Background(), nil); func() string { k, _, _ := keyOf(err); return k }() != "server.internal" {
-		t.Errorf("unary: %v", err)
-	}
-	stream := keyAll{}.WrapStreamingHandler(func(context.Context, connect.StreamingHandlerConn) error { return raw })
-	if err := stream(context.Background(), nil); func() string { k, _, _ := keyOf(err); return k }() != "server.internal" {
-		t.Errorf("stream: %v", err)
-	}
-	src, err := os.ReadFile("bus.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "NewBridgeServiceHandler(s, connect.WithInterceptors(append(ics[:len(ics):len(ics)], keyAll{})...))") {
-		t.Error("Handler does not install keyAll last, inside the caller's interceptors")
-	}
+func (f fallbackStub) Publish(context.Context, *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
+	return nil, f.err
 }
 
-// TestContextCodes: a plain context error keeps the code Connect sends for it unkeyed (its toWire, wrapIfContextError),
-// wrapped or not; any other plain error is Unknown. Each leaves keyed internal, with its words.
-func TestContextCodes(t *testing.T) {
-	for _, c := range []struct {
-		err  error
-		code connect.Code
-		name string
-	}{
-		{context.Canceled, connect.CodeCanceled, "canceled"},
-		{context.DeadlineExceeded, connect.CodeDeadlineExceeded, "deadline"},
-		{fmt.Errorf("query: %w", context.DeadlineExceeded), connect.CodeDeadlineExceeded, "wrapped deadline"},
-		{fmt.Errorf("send: %w", context.Canceled), connect.CodeCanceled, "wrapped canceled"},
-		{os.ErrDeadlineExceeded, connect.CodeDeadlineExceeded, "os deadline"},
-		{errors.New("broken pipe"), connect.CodeUnknown, "plain"},
-	} {
-		got := withKey(c.err)
-		if k, _, ok := keyOf(got); !ok || k != "server.internal" || connect.CodeOf(got) != c.code || !strings.Contains(got.Error(), c.err.Error()) {
-			t.Errorf("%s: %v code %v key %q", c.name, got, connect.CodeOf(got), k)
-		}
-	}
+func (f fallbackStub) Subscribe(context.Context, *connect.Request[bridgev1.SubscribeRequest], *connect.ServerStream[bridgev1.SubscribeResponse]) error {
+	return f.err
 }
 
-// TestSentinelUnchanged: keying never changes the handler's error, which may be a shared sentinel: concurrent requests
-// do not race on it (run with -race), and it stays unkeyed with what it had, while the copy carries that, then the key.
-// Both forms run: one with meta and a detail, and one with neither, whose Meta() would create the map on first read.
-func TestSentinelUnchanged(t *testing.T) {
+// TestFallback: mounted with Handler's option, what a handler returns without a key (unary or streaming) reaches a
+// client keyed internal, as both details, with its code and words; a keyed error keeps its own key and two details; a
+// shared sentinel is never changed, under concurrent requests (run with -race). connectkeys' own tests hold the table
+// (context codes, copies, the outermost order); this holds the bridge's wiring of it.
+func TestFallback(t *testing.T) {
 	why, err := connect.NewErrorDetail(wrapperspb.String("gone"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	full := connect.NewError(connect.CodeNotFound, errors.New("no such subscription"))
-	full.Meta().Set("X-Why", "gone")
-	full.AddDetail(why)
+	sentinel := connect.NewError(connect.CodeNotFound, errors.New("no such subscription"))
+	sentinel.Meta().Set("X-Why", "gone")
+	sentinel.AddDetail(why)
 	for _, c := range []struct {
-		name     string
-		sentinel *connect.Error
-		details  int // the sentinel's own
-		meta     string
+		name    string
+		err     error
+		code    connect.Code
+		key     string
+		msg     string
+		details int
 	}{
-		{"with meta and detail", full, 1, "gone"},
-		{"bare", connect.NewError(connect.CodeNotFound, errors.New("no such subscription")), 0, ""},
+		{"raw", errors.New("send: broken pipe"), connect.CodeUnknown, "server.internal", "send: broken pipe", 2},
+		{"deadline", fmt.Errorf("query: %w", context.DeadlineExceeded), connect.CodeDeadlineExceeded, "server.internal", "query: context deadline exceeded", 2},
+		{"canceled", fmt.Errorf("send: %w", context.Canceled), connect.CodeCanceled, "server.internal", "send: context canceled", 2},
+		{"sentinel", sentinel, connect.CodeNotFound, "server.internal", "no such subscription", 3},
+		{"keyed", keyed(connect.CodeAborted, keyGapped, errGapped), connect.CodeAborted, "stream.gapped", errGapped.Error(), 2}, // the positive control
 	} {
+		mux := http.NewServeMux()
+		mux.Handle(bridgev1connect.NewBridgeServiceHandler(fallbackStub{err: c.err}, withInterceptors()))
+		srv := httptest.NewServer(mux)
+		api := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL)
 		var wg sync.WaitGroup
-		for range 20 {
-			wg.Add(1)
+		check := func(form string, got error) {
+			defer wg.Done()
+			var ce *connect.Error
+			if k, _, ok := keyOf(got); !ok || k != c.key || !twinned(got) || connect.CodeOf(got) != c.code || !errors.As(got, &ce) ||
+				ce.Message() != c.msg || len(ce.Details()) != c.details {
+				t.Errorf("%s %s: %v key %q", c.name, form, got, k)
+				return
+			}
+			if c.err == sentinel && (ce.Meta().Get("X-Why") != "gone" || ce.Details()[0].Type() != why.Type()) {
+				t.Errorf("%s %s: the sentinel's meta or detail was lost: %v", c.name, form, got)
+			}
+		}
+		for range 10 {
+			wg.Add(2)
 			go func() {
-				defer wg.Done()
-				got := withKey(c.sentinel)
-				var ce *connect.Error
-				if k, _, ok := keyOf(got); !ok || k != "server.internal" || !errors.As(got, &ce) || ce.Code() != connect.CodeNotFound ||
-					ce.Message() != "no such subscription" || ce.Meta().Get("X-Why") != c.meta || len(ce.Details()) != c.details+1 ||
-					(c.details > 0 && ce.Details()[0].Type() != why.Type()) {
-					t.Errorf("%s: keyed: %v", c.name, got)
+				_, err := api.Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
+				check("unary", err)
+			}()
+			go func() {
+				s, err := api.Subscribe(context.Background(), connect.NewRequest(&bridgev1.SubscribeRequest{}))
+				if err == nil {
+					for s.Receive() {
+					}
+					err = s.Err()
 				}
+				check("stream", err)
 			}()
 		}
 		wg.Wait()
-		if _, _, ok := keyOf(c.sentinel); ok || len(c.sentinel.Details()) != c.details || c.sentinel.Meta().Get("X-Why") != c.meta {
-			t.Errorf("%s: the sentinel was changed: %d details", c.name, len(c.sentinel.Details()))
+		srv.Close()
+	}
+	if _, _, ok := keyOf(sentinel); ok || len(sentinel.Details()) != 1 || sentinel.Meta().Get("X-Why") != "gone" {
+		t.Errorf("the sentinel was changed: %d details", len(sentinel.Details()))
+	}
+}
+
+// TestHandlerFallback: the real Server.Handler puts the key fallback outside every interceptor it is given: an
+// interceptor sees an unkeyed error, and the client gets it keyed server.internal, as both details.
+func TestHandlerFallback(t *testing.T) {
+	seenc := make(chan error, 1) // the server's goroutine hands what it saw to the test's
+	record := connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			res, err := next(ctx, req)
+			seenc <- err
+			return res, err
 		}
+	})
+	raw := connect.UnaryInterceptorFunc(func(connect.UnaryFunc) connect.UnaryFunc {
+		return func(context.Context, connect.AnyRequest) (connect.AnyResponse, error) {
+			return nil, errors.New("inner: raw")
+		}
+	})
+	mux := http.NewServeMux()
+	mux.Handle(New(nil, nil, nil).Handler(record, raw)) // raw never calls next: no store is reached
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	_, err := bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL).Publish(context.Background(), connect.NewRequest(&bridgev1.PublishRequest{}))
+	var seen error
+	select { // sent before the response was written; nil if the interceptor never ran
+	case seen = <-seenc:
+	default:
+	}
+	if seen == nil || seen.Error() != "inner: raw" {
+		t.Errorf("the recording interceptor saw %v, want the unkeyed error", seen)
+	} else if _, _, ok := keyOf(seen); ok {
+		t.Errorf("the recording interceptor saw %v keyed, want it unkeyed", seen)
+	}
+	var ce *connect.Error
+	if k, _, ok := keyOf(err); !ok || k != "server.internal" || !twinned(err) || !errors.As(err, &ce) || ce.Message() != "inner: raw" {
+		t.Errorf("%v: key %q, want server.internal as both details, with the interceptor's words", err, k)
+	}
+}
+
+// wireDetail is a detail of a Connect protocol error body.
+type wireDetail struct{ Type, Value string }
+
+// TestFallbackMalformed: an unreadable unary request is refused by Connect before the handler chain, so it carries no
+// key; a stream's is read inside the chain, so it is keyed server.internal, as both details, with Connect's code.
+func TestFallbackMalformed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle(bridgev1connect.NewBridgeServiceHandler(fallbackStub{err: errors.New("unreached")}, withInterceptors()))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res, err := srv.Client().Post(srv.URL+bridgev1connect.BridgeServicePublishProcedure, "application/json", strings.NewReader("{"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unary struct {
+		Code    string
+		Details []wireDetail
+	}
+	if err := json.NewDecoder(res.Body).Decode(&unary); err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if unary.Code != "invalid_argument" || len(unary.Details) != 0 {
+		t.Errorf("unary: %+v, want invalid_argument with no detail", unary)
+	}
+
+	env := make([]byte, 5, 6)
+	binary.BigEndian.PutUint32(env[1:], 1)
+	res, err = srv.Client().Post(srv.URL+bridgev1connect.BridgeServiceSubscribeProcedure, "application/connect+json", bytes.NewReader(append(env, '{')))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	_, _ = body.ReadFrom(res.Body)
+	_ = res.Body.Close()
+	b := body.Bytes()
+	if len(b) < 5 || b[0]&2 == 0 {
+		t.Fatalf("stream: %q, want an end-stream message", b)
+	}
+	var end struct {
+		Error struct {
+			Code    string
+			Details []wireDetail
+		}
+	}
+	if err := json.Unmarshal(b[5:], &end); err != nil {
+		t.Fatal(err)
+	}
+	ds := end.Error.Details
+	if end.Error.Code != "invalid_argument" || len(ds) != 2 || ds[0].Type != "bridge.v1.ErrorKey" ||
+		ds[1].Type != "ukubi.errors.v1.ErrorKey" || ds[0].Value != ds[1].Value {
+		t.Fatalf("stream: %+v, want invalid_argument with both details", end.Error)
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(ds[0].Value, "="))
+	var k bridgev1.ErrorKey
+	if err != nil || proto.Unmarshal(raw, &k) != nil || k.GetKey() != "server.internal" {
+		t.Errorf("stream: key %q (%v)", k.GetKey(), err)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +27,17 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1/bridgev1connect"
 )
 
-// collector is an OTLP/HTTP traces receiver: the names of the spans it was sent.
+// collector is an OTLP/HTTP traces receiver: the spans it was sent.
 type collector struct {
 	mu    sync.Mutex
-	names []string
+	spans []seen
+}
+
+// seen is a span as its trace backend files it: by service, with its parent (if any) and the traces it links to.
+type seen struct {
+	name, service string
+	parent        bool
+	links         []string // trace ids, hex
 }
 
 func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,9 +50,19 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, rs := range req.ResourceSpans {
+		service := ""
+		for _, a := range rs.GetResource().GetAttributes() {
+			if a.GetKey() == "service.name" {
+				service = a.GetValue().GetStringValue()
+			}
+		}
 		for _, ss := range rs.ScopeSpans {
 			for _, s := range ss.Spans {
-				c.names = append(c.names, s.Name)
+				sn := seen{name: s.Name, service: service, parent: len(s.ParentSpanId) > 0}
+				for _, l := range s.Links {
+					sn.links = append(sn.links, hex.EncodeToString(l.TraceId))
+				}
+				c.spans = append(c.spans, sn)
 			}
 		}
 	}
@@ -51,19 +70,17 @@ func (c *collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(nil)
 }
 
-func (c *collector) got() map[string]int {
+// got is a copy of the spans so far, taken under mu.
+func (c *collector) got() []seen {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	m := map[string]int{}
-	for _, n := range c.names {
-		m[n]++
-	}
-	return m
+	return slices.Clone(c.spans)
 }
 
 // TestMainTraces runs the real binary (main, in a child process) with OTEL_EXPORTER_OTLP_TRACES_ENDPOINT set: a span
 // per webhook route and per API call reaches the collector, and so does the span of a request still in flight at
-// SIGTERM (main waits for handlers before it shuts the tracer down). Needs BRIDGE_TEST_DATABASE_URL.
+// SIGTERM (main waits for handlers before it shuts the tracer down). Every span is service ukubi-bridge's and a root:
+// a caller's traceparent (on one webhook and one API call) is linked, never a parent. Needs BRIDGE_TEST_DATABASE_URL.
 func TestMainTraces(t *testing.T) {
 	if os.Getenv("BRIDGE_MAIN_CHILD") == "1" {
 		main()
@@ -118,15 +135,23 @@ func TestMainTraces(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	const caller = "0af7651916cd43dd8448eb211c80319c"
+	traceparent := "00-" + caller + "-b7ad6b7169203331-01"
 	for _, p := range []string{"/webhook/github", "/webhook/alertmanager", "/webhook/grafana"} {
-		r, err := http.Post(addr+p, "application/json", strings.NewReader("{}"))
+		req, _ := http.NewRequest(http.MethodPost, addr+p, strings.NewReader("{}"))
+		if p == "/webhook/github" {
+			req.Header.Set("traceparent", traceparent)
+		}
+		r, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = r.Body.Close()
 	}
 	api := bridgev1connect.NewBridgeServiceClient(http.DefaultClient, addr)
-	if _, err := api.Publish(ctx, connect.NewRequest(&bridgev1.PublishRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
+	pub := connect.NewRequest(&bridgev1.PublishRequest{})
+	pub.Header().Set("traceparent", traceparent)
+	if _, err := api.Publish(ctx, pub); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("Publish without a token: %v", err)
 	}
 	if s, err := api.Subscribe(ctx, connect.NewRequest(&bridgev1.SubscribeRequest{})); err == nil {
@@ -160,11 +185,25 @@ func TestMainTraces(t *testing.T) {
 		"POST /webhook/github": 2, "POST /webhook/alertmanager": 1, "POST /webhook/grafana": 1,
 		"bridge.v1.BridgeService/Publish": 1, "bridge.v1.BridgeService/Subscribe": 1,
 	}
-	got := col.got()
+	spans := col.got()
+	got := map[string]int{}
+	for _, s := range spans {
+		got[s.name]++
+	}
 	for n, c := range want {
 		if got[n] != c {
 			t.Errorf("%d spans %q, want %d (all: %v)", got[n], n, c, got)
 		}
+	}
+	linked := map[string]int{}
+	for _, s := range spans {
+		if s.service != "ukubi-bridge" || s.parent || len(s.links) > 1 || len(s.links) == 1 && s.links[0] != caller {
+			t.Errorf("%s: service %q parent %v links %v", s.name, s.service, s.parent, s.links)
+		}
+		linked[s.name] += len(s.links)
+	}
+	if linked["POST /webhook/github"] != 1 || linked["bridge.v1.BridgeService/Publish"] != 1 {
+		t.Errorf("the caller's trace is not linked once from each traced call: %v", linked) // the positive control
 	}
 }
 

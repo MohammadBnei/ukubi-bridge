@@ -840,7 +840,10 @@ func (x *ReplayResponse) GetGap() *Gap {
 // (internal/bus/errkeys.go, listed in README.md), which a client branches on
 // beside the code, and the source whose words the message holds ("" for the
 // bridge's own, "store" for pgx's or Postgres's). Messages are for people and
-// may change; keys do not.
+// may change; keys do not. The same bytes also ride as a second detail,
+// ukubi.errors.v1.ErrorKey (ukubi-go, the shared name); find either by its
+// type, not its position. This message is kept for existing clients and
+// slated for removal (README.md).
 type ErrorKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`

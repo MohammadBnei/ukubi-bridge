@@ -201,9 +201,10 @@ func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
 	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}, sentGap: map[string]int64{}}
 }
 
-// Handler mounts the service on a mux, with ics outermost (tracing: its span sees the keyed error) and keyAll last.
+// Handler mounts the service on a mux, with ics inside the key fallback (standard §6: the fallback is outermost, so
+// it also keys what an interceptor returns; a tracing span sees the handler's error before it is keyed).
 func (s *Server) Handler(ics ...connect.Interceptor) (string, http.Handler) {
-	return bridgev1connect.NewBridgeServiceHandler(s, connect.WithInterceptors(append(ics[:len(ics):len(ics)], keyAll{})...))
+	return bridgev1connect.NewBridgeServiceHandler(s, withInterceptors(ics...))
 }
 
 // errGapped ends a stream whose subscription a deletion run gapped (events it
