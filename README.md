@@ -8,11 +8,16 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 ## What it does today
 
 - `POST /webhook/github` — GitHub App deliveries. HMAC-verified, filtered to
-  `pull_request` (opened/synchronize/closed/reopened), `issue_comment` (created)
-  and `pull_request_review` (submitted), normalised to the envelope in
-  `internal/event`, appended to `events` once per `X-GitHub-Delivery`.
-  Trust follows the PR or comment author, never the webhook sender; a fork PR is
-  never trusted.
+  `pull_request` (opened/synchronize/closed/reopened/labeled), `issues`
+  (opened/labeled), `issue_comment` (created) and `pull_request_review`
+  (submitted), normalised to the envelope in `internal/event`, appended to
+  `events` once per `X-GitHub-Delivery`. Two trust facts (agent-fleet ADR-0082
+  §12): `actor_trusted`, the actor (the opener on `opened`, the sender
+  otherwise, the comment or review author) is in `BRIDGE_TRUSTED_LOGINS`; and
+  `thread_owned`, the PR's or issue's author is a trusted login or a fleet
+  agent, and a PR's head is in the same repo. The head repo is only in
+  `pull_request` and `pull_request_review` payloads, so a comment on a fork PR
+  can read owned. The webhook must subscribe to Issues and Pull requests.
 - GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
   to the lookback window and redelivers, oldest first, each one not in
   `events` — failed (bridge downtime) or acknowledged with 202 (lost to a
@@ -25,7 +30,7 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
   `repeat_interval` resend of the same firing coalesces while its resolution
   is a new event. Type `dev.bnei.alert.firing|resolved`, subject
-  `alert/<fingerprint>`, `actor=machine`, never trusted. 503 when the store is
+  `alert/<fingerprint>`, `actor=machine`, neither trust fact. 503 when the store is
   down, so the sender retries.
 - `GET /healthz`.
 - `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
@@ -42,9 +47,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     cannot post onto another source's thread (a GitHub PR, say). Negative
     `hops` is refused. An event Postgres cannot store (a NUL byte in a
     string field) is `InvalidArgument` (`\u0000` in `data` is stored as `\ufffd`); `Unavailable` always means retry.
-    A non-privileged client's event is stamped with its own `kind` as actor and its name as `actor_login`, `trusted=false`, no
+    A non-privileged client's event is stamped with its own `kind` as actor and its name as `actor_login`, neither trust fact, no
     `owner`, and `hops` one above what it sent (`causation_id` kept). Only a
-    `privileged` client (agent-fleet core) sets actor, trust, owner and hops.
+    `privileged` client (agent-fleet core) sets actor, `actor_trusted`, owner and hops; nobody publishes `thread_owned`, a GitHub fact.
     Nobody sets `replayed`.
   - `Subscribe(name, types, subjects)` — `name` is the client's own name or
     `<name>/<suffix>`. The whole filter must fit one of the client's
@@ -123,7 +128,7 @@ Not yet:
 
 ADR-0071 §6's "drop events caused by the thread's own agent identity" is not
 done here: the bridge has no thread ownership. Core's dispatcher never lets
-one wake a session (an agent's GitHub login is never trusted), but it is still
+one wake a session (an agent's GitHub login is never a trusted actor), but it is still
 delivered as context or filed as a proposal, not dropped. Only `PublishEvent`
 hand-offs count toward its per-thread agent-wake cap.
 

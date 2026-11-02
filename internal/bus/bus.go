@@ -43,7 +43,7 @@ type Client struct {
 	// What it may read: one subscription's whole filter must fit one rule
 	// (ADR-0066 §2). privileged never widens it.
 	Subscribe  []Rule `json:"subscribe"`
-	Privileged bool   `json:"privileged"` // may set actor, trusted, hops, causation_id
+	Privileged bool   `json:"privileged"` // may set actor, actor_trusted, hops, causation_id (never thread_owned, a GitHub fact)
 }
 
 // Rule pairs type prefixes with subject prefixes; subject "" allows any.
@@ -315,8 +315,9 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	e := event.Event{
 		ID: p.GetId(), Source: "client/" + c.Name, Type: p.GetType(), Subject: p.GetSubject(),
 		Time: time.Now(), Data: data,
-		Actor: p.GetActor(), ActorLogin: p.GetActorLogin(), Trusted: p.GetTrusted(), Owner: p.GetOwner(),
-		Hops: int(p.GetHops()), CausationID: p.GetCausationId(),
+		Actor: p.GetActor(), ActorLogin: p.GetActorLogin(), ActorTrusted: p.GetActorTrusted(),
+		Owner: p.GetOwner(),
+		Hops:  int(p.GetHops()), CausationID: p.GetCausationId(),
 	}
 	if p.GetTime() != nil {
 		e.Time = p.GetTime().AsTime()
@@ -326,9 +327,9 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 			return nil, keyed(connect.CodeInvalidArgument, keyActor, fmt.Errorf("unknown actor %q", e.Actor))
 		}
 	} else {
-		// The client vouches only for itself: its own kind, never trusted,
-		// one hop further than whatever it claims caused this.
-		e.Actor, e.ActorLogin, e.Trusted, e.Owner = c.Kind, c.Name, false, ""
+		// The client vouches only for itself: its own kind, neither trust
+		// fact, one hop further than whatever it claims caused this.
+		e.Actor, e.ActorLogin, e.ActorTrusted, e.Owner = c.Kind, c.Name, false, ""
 		e.Hops++
 	}
 	inserted, err := s.st.Insert(ctx, e)
@@ -646,7 +647,7 @@ func toProto(e event.Event, replayed bool) *bridgev1.CloudEvent {
 	return &bridgev1.CloudEvent{
 		Seq: e.Seq, Id: e.ID, Source: e.Source, Type: e.Type, Subject: e.Subject,
 		Time: timestamppb.New(e.Time), Data: e.Data, Actor: e.Actor, ActorLogin: e.ActorLogin,
-		Trusted: e.Trusted, Owner: e.Owner, Hops: int32(e.Hops), CausationId: e.CausationID,
+		ActorTrusted: e.ActorTrusted, ThreadOwned: e.ThreadOwned, Owner: e.Owner, Hops: int32(e.Hops), CausationId: e.CausationID,
 		Replayed: replayed,
 	}
 }

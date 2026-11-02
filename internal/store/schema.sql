@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS events (
     subject      text        NOT NULL,
     actor        text        NOT NULL,
     actor_login  text        NOT NULL DEFAULT '',
-    trusted      boolean     NOT NULL,
+    actor_trusted boolean    NOT NULL DEFAULT false,
+    thread_owned  boolean    NOT NULL DEFAULT false,
     owner        text        NOT NULL DEFAULT '',
     hops         integer     NOT NULL DEFAULT 0,
     causation_id text        NOT NULL DEFAULT '',
@@ -81,3 +82,18 @@ $$;
 
 -- Retention looks dead letters up by subject for every event it considers.
 CREATE INDEX IF NOT EXISTS dead_letters_subject ON dead_letters (subject, event_id) WHERE cleared_at IS NULL;
+
+-- agent-fleet ADR-0082 §12 (2026-11-02): one `trusted` bit became two facts.
+-- A logged event that was trusted had both; one that was not keeps neither
+-- (lossy, never more trust than it had). Idempotent: a no-op once done.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS actor_trusted boolean NOT NULL DEFAULT false;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS thread_owned boolean NOT NULL DEFAULT false;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = current_schema() AND table_name = 'events' AND column_name = 'trusted') THEN
+    UPDATE events SET actor_trusted = true, thread_owned = true WHERE trusted;
+    ALTER TABLE events DROP COLUMN trusted;
+  END IF;
+END
+$$;
