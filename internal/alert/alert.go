@@ -50,7 +50,7 @@ func Normalize(source string, raw json.RawMessage, now time.Time) (event.Event, 
 		Time:    now,
 		Data:    raw, // verbatim: every label, annotation and URL survives
 		Actor:   event.ActorMachine,
-		Trusted: false, // an alert never wakes a session on its own (ADR-0071 §6)
+		// Neither trust fact: an alert never wakes a session on its own (ADR-0071 §6).
 	}, nil
 }
 

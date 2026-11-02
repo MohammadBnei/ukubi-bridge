@@ -25,12 +25,21 @@ message CloudEvent {
   // human | bot | agent | machine.
   string actor = 8;
   string actor_login = 9;
-  bool trusted = 10;
+  reserved 10;
+  reserved "trusted";
   string owner = 11;
   int32 hops = 12;
   string causation_id = 13;
   // Only Replay sets it.
   bool replayed = 14;
+  // The actor is a trusted login, the owner (T0). Only a privileged client
+  // sets it on Publish (agent-fleet ADR-0082 §12).
+  bool actor_trusted = 15;
+  // The subject's author is a trusted login or a fleet agent: the thread is
+  // ours. A fork PR is never owned, but the head repo is only in
+  // pull_request and pull_request_review payloads: a comment on a fork PR
+  // can read owned. GitHub events only; Publish always clears it.
+  bool thread_owned = 16;
 }
 
 // BridgeService is the bus API. Callers authenticate with an authentik access

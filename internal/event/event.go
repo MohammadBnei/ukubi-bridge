@@ -28,11 +28,15 @@ type Event struct {
 	Data    json.RawMessage
 
 	// Extensions.
-	Actor       string // ActorHuman | ActorBot | ActorAgent | ActorMachine
-	ActorLogin  string // who caused it (GitHub login, empty for machine sources)
-	Trusted     bool   // may open a new thread / wake a session (ADR-0071 §6)
-	Owner       string // routed definition; set by the dispatcher, empty at ingest
-	Hops        int
-	CausationID string
-	Replayed    bool
+	Actor      string // ActorHuman | ActorBot | ActorAgent | ActorMachine
+	ActorLogin string // who caused it (GitHub login, empty for machine sources)
+	// ActorTrusted: the actor is a trusted login (T0). ThreadOwned: the
+	// subject's author is a trusted login or a fleet agent, and a PR's head is
+	// in the same repo (agent-fleet ADR-0082 §12).
+	ActorTrusted bool
+	ThreadOwned  bool
+	Owner        string // routed definition; set by the dispatcher, empty at ingest
+	Hops         int
+	CausationID  string
+	Replayed     bool
 }

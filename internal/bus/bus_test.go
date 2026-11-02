@@ -298,27 +298,28 @@ func TestAuthz(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	claim := &bridgev1.CloudEvent{Id: "z1", Type: "dev.app.x", Subject: "app/z", Actor: "human", ActorLogin: "operator",
-		Trusted: true, Owner: "zot", Hops: 2, CausationId: "c1", Replayed: true}
+		ActorTrusted: true, ThreadOwned: true, Owner: "zot", Hops: 2, CausationId: "c1", Replayed: true}
 	f.publish(t, "app-token", claim)
 	claim.Id = "z2"
 	f.publish(t, "core-token", claim)
 
 	type row struct {
 		actor, login, owner, causation string
-		trusted, replayed              bool
+		actorTrusted, threadOwned      bool
+		replayed                       bool
 		hops                           int
 	}
 	get := func(id string) (r row) {
-		if err := f.db.QueryRow(ctx, `SELECT actor, actor_login, owner, causation_id, trusted, replayed, hops FROM events WHERE ce_id = $1`, id).
-			Scan(&r.actor, &r.login, &r.owner, &r.causation, &r.trusted, &r.replayed, &r.hops); err != nil {
+		if err := f.db.QueryRow(ctx, `SELECT actor, actor_login, owner, causation_id, actor_trusted, thread_owned, replayed, hops FROM events WHERE ce_id = $1`, id).
+			Scan(&r.actor, &r.login, &r.owner, &r.causation, &r.actorTrusted, &r.threadOwned, &r.replayed, &r.hops); err != nil {
 			t.Fatal(err)
 		}
 		return r
 	}
-	if got, want := get("z1"), (row{"bot", "app", "", "c1", false, false, 3}); got != want {
+	if got, want := get("z1"), (row{"bot", "app", "", "c1", false, false, false, 3}); got != want {
 		t.Fatalf("unprivileged publish stored %+v, want %+v", got, want)
 	}
-	if got, want := get("z2"), (row{"human", "operator", "zot", "c1", true, false, 2}); got != want {
+	if got, want := get("z2"), (row{"human", "operator", "zot", "c1", true, false, false, 2}); got != want {
 		t.Fatalf("privileged publish stored %+v, want %+v", got, want)
 	}
 

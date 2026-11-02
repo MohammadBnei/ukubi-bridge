@@ -44,7 +44,8 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// ponytail: idempotent DDL at boot, a migration tool when the schema first changes.
+	// ponytail: idempotent DDL at boot, upgrades included (schema.sql); a
+	// migration tool once an upgrade cannot be written idempotently.
 	if _, err := db.Exec(ctx, schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -112,12 +113,12 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	}
 	var id int64
 	err = tx.QueryRow(ctx, `
-		INSERT INTO events (source, ce_id, type, subject, actor, actor_login, trusted,
+		INSERT INTO events (source, ce_id, type, subject, actor, actor_login, actor_trusted, thread_owned,
 		                    owner, hops, causation_id, replayed, data, time)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (source, ce_id) DO NOTHING
 		RETURNING id`,
-		e.Source, e.ID, e.Type, e.Subject, e.Actor, e.ActorLogin, e.Trusted,
+		e.Source, e.ID, e.Type, e.Subject, e.Actor, e.ActorLogin, e.ActorTrusted, e.ThreadOwned,
 		e.Owner, e.Hops, e.CausationID, e.Replayed, e.Data, e.Time).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -181,7 +182,7 @@ type Delivery struct {
 func (s *Store) Match(ctx context.Context, name string, after int64, limit int) ([]Delivery, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT e.id, e.source, e.ce_id, e.type, e.subject, e.time, e.data, e.actor, e.actor_login,
-		       e.trusted, e.owner, e.hops, e.causation_id,
+		       e.actor_trusted, e.thread_owned, e.owner, e.hops, e.causation_id,
 		       EXISTS (SELECT 1 FROM dead_letters d
 		               WHERE d.subscription = s.name AND d.subject = e.subject AND d.cleared_at IS NULL)
 		FROM subscriptions s JOIN events e ON e.id > $2
@@ -194,7 +195,7 @@ func (s *Store) Match(ctx context.Context, name string, after int64, limit int) 
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Delivery, error) {
 		var d Delivery
 		err := r.Scan(&d.Seq, &d.Source, &d.ID, &d.Type, &d.Subject, &d.Time, &d.Data, &d.Actor, &d.ActorLogin,
-			&d.Trusted, &d.Owner, &d.Hops, &d.CausationID, &d.Parked)
+			&d.ActorTrusted, &d.ThreadOwned, &d.Owner, &d.Hops, &d.CausationID, &d.Parked)
 		return d, err
 	})
 }

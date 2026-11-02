@@ -76,7 +76,7 @@ func TestAlertmanagerFiringRepeatResolved(t *testing.T) {
 	}
 	f, r := log.rows[0], log.rows[1]
 	if f.ID != "abc123:firing:2026-10-18T09:00:00.123Z" || f.Type != "dev.bnei.alert.firing" ||
-		f.Subject != "alert/abc123" || f.Source != "alertmanager" || f.Actor != event.ActorMachine || f.Trusted {
+		f.Subject != "alert/abc123" || f.Source != "alertmanager" || f.Actor != event.ActorMachine || f.ActorTrusted || f.ThreadOwned {
 		t.Errorf("firing envelope: %+v", f)
 	}
 	if r.Type != "dev.bnei.alert.resolved" || r.Subject != f.Subject || r.ID == f.ID {

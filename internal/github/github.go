@@ -40,8 +40,7 @@ type Policy struct {
 }
 
 // owns reports whether threads authored by login are the operator's own:
-// trusted logins, and the fleet agents working for the operator. Only a
-// trusted actor's event on such a thread is trusted.
+// trusted logins, and the fleet agents working for the operator.
 func (p Policy) owns(login string) bool {
 	return p.Trusted[login] || p.Agents[login]
 }
@@ -49,7 +48,8 @@ func (p Policy) owns(login string) bool {
 // allowed lists the accepted event/action pairs. check_run, status and push
 // fan out per commit and would wake agents in a loop (ADR-0060 §5).
 var allowed = map[string]map[string]bool{
-	"pull_request":        {"opened": true, "synchronize": true, "closed": true, "reopened": true},
+	"pull_request":        {"opened": true, "synchronize": true, "closed": true, "reopened": true, "labeled": true},
+	"issues":              {"opened": true, "labeled": true},
 	"issue_comment":       {"created": true},
 	"pull_request_review": {"submitted": true},
 }
@@ -130,6 +130,15 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 			thread = "pr"
 		}
 		subject = fmt.Sprintf("github/%s/%s/%d", pl.Repository.FullName, thread, pl.Issue.Number)
+	case "issues":
+		if pl.Issue == nil {
+			return event.Event{}, errors.New("issues event without issue")
+		}
+		actor, author = pl.Issue.User, pl.Issue.User
+		if pl.Action != "opened" {
+			actor = pl.Sender
+		}
+		subject = fmt.Sprintf("github/%s/issue/%d", pl.Repository.FullName, pl.Issue.Number)
 	case "pull_request_review":
 		if pl.PullRequest == nil || pl.Review == nil {
 			return event.Event{}, errors.New("pull_request_review without pull_request or review")
@@ -138,28 +147,31 @@ func Normalize(p Policy, kind, delivery string, body []byte, now time.Time) (eve
 		subject = fmt.Sprintf("github/%s/pr/%d", pl.Repository.FullName, pl.PullRequest.Number)
 	}
 
-	// Both are needed: a trusted login acting on an outsider's thread must
-	// not adopt it, and an outsider acting on the operator's thread is not
-	// the operator. An empty login (no sender) is never trusted.
-	trusted := p.Trusted[actor.Login] && p.owns(author.Login)
-	// A PR from a fork is never trusted, whoever opened it (ADR-0060 §6).
+	// Two facts, never one bit (agent-fleet ADR-0082 §12): who acts, and whose
+	// thread it is. The owner acting on an outsider's thread does not adopt
+	// it, and an outsider acting on the owner's thread is not the owner. An
+	// empty login (no sender) is never trusted.
+	actorTrusted := p.Trusted[actor.Login]
+	threadOwned := p.owns(author.Login)
+	// A PR from a fork is never owned, whoever opened it (ADR-0060 §6).
 	if pl.PullRequest != nil {
 		head := pl.PullRequest.Head.Repo
 		if head == nil || head.FullName != pl.Repository.FullName {
-			trusted = false
+			threadOwned = false
 		}
 	}
 
 	return event.Event{
-		ID:         delivery,
-		Source:     "github.com/" + pl.Repository.FullName,
-		Type:       "dev.bnei.github." + kind + "." + pl.Action,
-		Subject:    subject,
-		Time:       now,
-		Data:       body,
-		Actor:      actorKind(p, actor),
-		ActorLogin: actor.Login,
-		Trusted:    trusted,
+		ID:           delivery,
+		Source:       "github.com/" + pl.Repository.FullName,
+		Type:         "dev.bnei.github." + kind + "." + pl.Action,
+		Subject:      subject,
+		Time:         now,
+		Data:         body,
+		Actor:        actorKind(p, actor),
+		ActorLogin:   actor.Login,
+		ActorTrusted: actorTrusted,
+		ThreadOwned:  threadOwned,
 	}, nil
 }
 

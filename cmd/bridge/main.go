@@ -205,7 +205,7 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "trusted", e.Trusted, "new", inserted)
+		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "actorTrusted", e.ActorTrusted, "threadOwned", e.ThreadOwned, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
 }

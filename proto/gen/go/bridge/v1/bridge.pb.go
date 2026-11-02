@@ -42,12 +42,19 @@ type CloudEvent struct {
 	// human | bot | agent | machine.
 	Actor       string `protobuf:"bytes,8,opt,name=actor,proto3" json:"actor,omitempty"`
 	ActorLogin  string `protobuf:"bytes,9,opt,name=actor_login,json=actorLogin,proto3" json:"actor_login,omitempty"`
-	Trusted     bool   `protobuf:"varint,10,opt,name=trusted,proto3" json:"trusted,omitempty"`
 	Owner       string `protobuf:"bytes,11,opt,name=owner,proto3" json:"owner,omitempty"`
 	Hops        int32  `protobuf:"varint,12,opt,name=hops,proto3" json:"hops,omitempty"`
 	CausationId string `protobuf:"bytes,13,opt,name=causation_id,json=causationId,proto3" json:"causation_id,omitempty"`
 	// Only Replay sets it.
-	Replayed      bool `protobuf:"varint,14,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	Replayed bool `protobuf:"varint,14,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	// The actor is a trusted login, the owner (T0). Only a privileged client
+	// sets it on Publish (agent-fleet ADR-0082 §12).
+	ActorTrusted bool `protobuf:"varint,15,opt,name=actor_trusted,json=actorTrusted,proto3" json:"actor_trusted,omitempty"`
+	// The subject's author is a trusted login or a fleet agent: the thread is
+	// ours. A fork PR is never owned, but the head repo is only in
+	// pull_request and pull_request_review payloads: a comment on a fork PR
+	// can read owned. GitHub events only; Publish always clears it.
+	ThreadOwned   bool `protobuf:"varint,16,opt,name=thread_owned,json=threadOwned,proto3" json:"thread_owned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -145,13 +152,6 @@ func (x *CloudEvent) GetActorLogin() string {
 	return ""
 }
 
-func (x *CloudEvent) GetTrusted() bool {
-	if x != nil {
-		return x.Trusted
-	}
-	return false
-}
-
 func (x *CloudEvent) GetOwner() string {
 	if x != nil {
 		return x.Owner
@@ -176,6 +176,20 @@ func (x *CloudEvent) GetCausationId() string {
 func (x *CloudEvent) GetReplayed() bool {
 	if x != nil {
 		return x.Replayed
+	}
+	return false
+}
+
+func (x *CloudEvent) GetActorTrusted() bool {
+	if x != nil {
+		return x.ActorTrusted
+	}
+	return false
+}
+
+func (x *CloudEvent) GetThreadOwned() bool {
+	if x != nil {
+		return x.ThreadOwned
 	}
 	return false
 }
@@ -900,7 +914,7 @@ var File_bridge_v1_bridge_proto protoreflect.FileDescriptor
 
 const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\n" +
-	"\x16bridge/v1/bridge.proto\x12\tbridge.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf2\x02\n" +
+	"\x16bridge/v1/bridge.proto\x12\tbridge.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaf\x03\n" +
 	"\n" +
 	"CloudEvent\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x0e\n" +
@@ -912,13 +926,14 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x04data\x18\a \x01(\fR\x04data\x12\x14\n" +
 	"\x05actor\x18\b \x01(\tR\x05actor\x12\x1f\n" +
 	"\vactor_login\x18\t \x01(\tR\n" +
-	"actorLogin\x12\x18\n" +
-	"\atrusted\x18\n" +
-	" \x01(\bR\atrusted\x12\x14\n" +
+	"actorLogin\x12\x14\n" +
 	"\x05owner\x18\v \x01(\tR\x05owner\x12\x12\n" +
 	"\x04hops\x18\f \x01(\x05R\x04hops\x12!\n" +
 	"\fcausation_id\x18\r \x01(\tR\vcausationId\x12\x1a\n" +
-	"\breplayed\x18\x0e \x01(\bR\breplayed\"=\n" +
+	"\breplayed\x18\x0e \x01(\bR\breplayed\x12#\n" +
+	"\ractor_trusted\x18\x0f \x01(\bR\factorTrusted\x12!\n" +
+	"\fthread_owned\x18\x10 \x01(\bR\vthreadOwnedJ\x04\b\n" +
+	"\x10\vR\atrusted\"=\n" +
 	"\x0ePublishRequest\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\"/\n" +
 	"\x0fPublishResponse\x12\x1c\n" +
