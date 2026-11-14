@@ -38,6 +38,11 @@ on:
 # The default for a job with no permissions block of its own. Every job here
 # declares one today (deploy alone, on main, has contents: write), so this
 # only covers a job added later without one.
+# A newer push to a PR supersedes its older run; push and dispatch runs never cancel (run_id keeps them apart).
+concurrency:
+  group: app-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -60,6 +65,7 @@ jobs:
   # container and a fork PR never reaches the build runner.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     services:
@@ -73,8 +79,8 @@ jobs:
     env:
       BRIDGE_TEST_DATABASE_URL: postgres://postgres:t@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - name: go vet + go test
@@ -88,14 +94,15 @@ jobs:
   # refuses a newer module). Default linters, no config file.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.14.0
 
