@@ -70,7 +70,7 @@ jobs:
       contents: read
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17.12-alpine
         env:
           POSTGRES_PASSWORD: t
         ports: ['5432:5432']
