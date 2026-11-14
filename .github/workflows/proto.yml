@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: proto-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   BUF_VERSION: '1.72.0'
   # The versions that produced the committed code: proto/gen/go/bridge/v1/
@@ -25,15 +29,16 @@ env:
 jobs:
   buf:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # The PR's merge commit (checkout's default), not its branch tip:
           # breaking and drift are judged on what would land. fetch-depth 0
           # for origin/main.
           fetch-depth: 0
 
-      - uses: bufbuild/buf-setup-action@v1
+      - uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
         with:
           version: ${{ env.BUF_VERSION }}
 
@@ -62,7 +67,7 @@ jobs:
             echo "no proto/ on origin/main yet, nothing to break against"
           fi
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 

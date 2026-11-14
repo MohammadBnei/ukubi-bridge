@@ -12,14 +12,19 @@ on:
     # edited: a title or body changed after the last push is scanned again.
     types: [opened, synchronize, reopened, edited]
 
+concurrency:
+  group: trailers-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   trailers:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # Every commit of the PR range needs its history.
           fetch-depth: 0
