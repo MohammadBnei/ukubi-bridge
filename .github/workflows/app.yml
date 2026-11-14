@@ -86,7 +86,7 @@ jobs:
     # Registry creds are readable only on push/workflow_dispatch (OIDC claim),
     # and image.yml's build job is the only one on the self-hosted runner.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    uses: MohammadBnei/ukubi-ci/.github/workflows/image.yml@03a616159bbadc9503ed4b218659e3705c55d858 # v0.3.0
+    uses: MohammadBnei/ukubi-ci/.github/workflows/image.yml@2a202d169153446bccf26ffe30dc39b3f21db273 # v0.4.0
     with:
       runs-on: '["self-hosted","ukubi-build"]'
       image: ukubi-bridge
