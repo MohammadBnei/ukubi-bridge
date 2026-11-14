@@ -1,6 +1,6 @@
 module github.com/MohammadBnei/ukubi-bridge
 
-go 1.27.1
+go 1.27.4
 
 require (
 	connectrpc.com/connect v1.21.0
