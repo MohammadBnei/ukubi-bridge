@@ -10,7 +10,8 @@ strategy:
 
 image:
   repository: registry.bnei.lan:5000/ukubi-bridge
-  # Bumped by .github/workflows/app.yml to the commit's short SHA.
+  # Bumped by ukubi-ci image.yml (called from .github/workflows/app.yml) to
+  # `<short sha>@sha256:<digest>`, so a rebuild of the same commit redeploys.
   #
   # `unreleased` is a placeholder that fails loudly. The registry entry in
   # infra-bootstrap belongs after this repo's first CI run on main has replaced
