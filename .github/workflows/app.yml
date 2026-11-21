@@ -1,5 +1,5 @@
 # Test and lint, then call the shared image.yml (ukubi-ci): it builds the bridge image on the build-runner
-# LXC, pushes it to the in-cluster Zot registry, and pins <sha>@<digest> in helm/values.yaml so ArgoCD rolls it
+# LXC, pushes it to the in-cluster Zot registry, and pins <sha>@<digest> in helm/image.yaml on the `deploy` branch (ArgoCD layers it over helm/values.yaml) so ArgoCD rolls it
 # out. The bump (GITHUB_TOKEN) never triggers another run, and helm/** is not a trigger path, so it cannot loop.
 # No :latest is pushed any more (nothing pulls it).
 #
@@ -31,7 +31,7 @@ on:
 
 # A newer push to a PR supersedes its older run; push and dispatch runs never cancel (run_id keeps them apart).
 concurrency:
-  group: app-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: app-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The default for a job with no permissions block of its own. Every job here
@@ -41,8 +41,8 @@ permissions:
   contents: read
 
 jobs:
-  # GitHub-hosted, so the store tests get a real Postgres from a service
-  # container and a fork PR never reaches the build runner.
+  # Forgejo's container runner (ubuntu-latest), so the store tests get a real
+  # Postgres from a service container and never touch the build runner.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -57,7 +57,8 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
     env:
-      BRIDGE_TEST_DATABASE_URL: postgres://postgres:t@localhost:5432/postgres?sslmode=disable
+      # On Forgejo the job runs in a container: the service is reached by its name.
+      BRIDGE_TEST_DATABASE_URL: postgres://postgres:t@postgres:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -87,15 +88,17 @@ jobs:
           version: v2.14.0
 
   # Build, push and deploy live in the shared ukubi-ci workflow (digest-pinned tag, stale-run guard, deploy job).
-  # Its per-image, per-ref concurrency replaces the old app-build/app-deploy groups.
+  # The workflow-level group above serialises main runs (Forgejo ignores image.yml's job-level groups).
   image:
     needs: [test, lint]
     # Registry creds are readable only on push/workflow_dispatch (OIDC claim),
     # and image.yml's build job is the only one on the self-hosted runner.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    uses: MohammadBnei/ukubi-ci/.github/workflows/image.yml@2a202d169153446bccf26ffe30dc39b3f21db273 # v0.4.0
+    uses: MohammadBnei/ukubi-ci/.github/workflows/image.yml@9af316b5d779b2d5ef3f55b9f11e20b8bf3f6ce8 # v0.11.1
     with:
-      runs-on: '["self-hosted","ukubi-build"]'
+      # The pin file on the deploy branch (ukubi-ci 0.11), not main's values.
+      values-file: helm/image.yaml
+      runs-on: '["ukubi-build"]'
       image: ukubi-bridge
     # image.yml's build job reads the registry password over OIDC, its deploy job pushes the bump.
     permissions:
