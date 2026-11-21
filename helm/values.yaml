@@ -26,16 +26,27 @@ service:
 # Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz,
 # /webhook/alertmanager, /webhook/grafana, /webhook/forgejo and the
 # BridgeService API are reachable only in-cluster. The baseline chain (origin
-# lock, rate limit, headers) stays on. Forgejo (CT 305) is outside the cluster,
-# so no delivery reaches /webhook/forgejo until an internal-only route locked
-# to the Forgejo host exists (README, Not yet).
+# lock, rate limit, headers) stays on. /webhook/forgejo is routed too, LAN-only
+# from the Forgejo host (below).
 ingress:
   pathPrefix: /webhook/github
+  # Forgejo (CT 305, 192.168.1.214) delivers over the LAN: CT 305 pins
+  # events.bnei.dev to the Traefik VIP .233 in its /etc/hosts (infra-bootstrap
+  # forgejo-configure.yml), so it never crosses Cloudflare, whose WAF skip
+  # rule covers /webhook/github only. Locked to .214 (Traefik sees the real
+  # peer: externalTrafficPolicy Local) and HMAC-checked like /webhook/github.
+  extraRoutes:
+    forgejo:
+      match: Host(`{{ .Values.ingress.hostname }}`) && PathPrefix(`/webhook/forgejo`)
+      priority: 100
+      middlewares:
+        - name: forgejo-only
+          namespace: ukubi-bridge
 
 # BRIDGE_DATABASE_URL, BRIDGE_GITHUB_WEBHOOK_SECRET, BRIDGE_GITHUB_APP_ID,
 # BRIDGE_GITHUB_APP_PRIVATE_KEY, BRIDGE_ALERT_TOKEN and
 # BRIDGE_FORGEJO_WEBHOOK_SECRET (optional: without it /webhook/forgejo is
-# off, one WARN line at start; the Secret does not render it yet), rendered by
+# off, one WARN line at start), rendered by
 # infra-bootstrap gitops/bootstrap/ukubi-bridge-secret.yaml. It still renders
 # the retired BRIDGE_CLIENTS too (ignored, logged at start) until ADR-0066's
 # rollout removes it. BRIDGE_OIDC_* are not secrets: they are explicit `env`
@@ -86,10 +97,42 @@ env:
   - name: BRIDGE_OIDC_CLIENT_ID
     value: "ukubi-bridge-api"
   # The trust anchor: authentik's signing certificate (PEM, one per key during
-  # a rotation). Empty until the provider exists (ADR-0066 rollout): the API
-  # then refuses every call and the webhooks keep working.
+  # a rotation). "authentik Self-signed Certificate", shared by every provider
+  # (taken from the atlas-api JWKS x5c, kid qqrvnSRh..., 2026-11-21). The
+  # hourly JWKS check below logs a mismatch after a rotation.
   - name: BRIDGE_OIDC_CERT
-    value: ""
+    value: |
+      -----BEGIN CERTIFICATE-----
+      MIIFUjCCAzqgAwIBAgIQVLuPFjSmRGGcUwdXhSg43zANBgkqhkiG9w0BAQsFADAd
+      MRswGQYDVQQDDBJhdXRoZW50aWsgMjAyNi41LjYwHhcNMjYwODE3MjIzMDI2WhcN
+      MjcwODE4MjIzMDI2WjBWMSowKAYDVQQDDCFhdXRoZW50aWsgU2VsZi1zaWduZWQg
+      Q2VydGlmaWNhdGUxEjAQBgNVBAoMCWF1dGhlbnRpazEUMBIGA1UECwwLU2VsZi1z
+      aWduZWQwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQC6r/TtR4qLUoHF
+      Ylv1T3izn4t4n3L1d2VAF0GSpcAiikyY5lEQyaTCR/m+eFTLAIITchiWSZgM5WbF
+      MNcEF5K7NW5bOY7I4jfULrPDPXn8OoC8Xp1ts3LBuQ7fACv4zuf9LGliDgF8Nn17
+      ON6/Ei6d3TmFJdzVBnK09m5DLEvM1lKJNIBRLSzgHLgr6YXOhK/NKNL9LdVsSexZ
+      rt531O2hosseYThYL2EvIfW6eIxuCtguBg21mNWW8Z5adUNQRT8q+g8uDp7FdTVh
+      eKBTfgDUYPtFTZsCzbR5dD6mev0ThMTdf9/wOs1/E0NEpntpRuCcESztG77DXSuQ
+      qiUy7yTx0Y4Exq328m4dNpWvH8YBuQZkZsr3nJjOEQJhenFyA0QTtMn7Y1t5coo/
+      cHA3910DU1IOB75OOfMBXoYQuXfe137um2o3F2d0qHD15FicKWSb366mcDCK+59F
+      9GDfQnwRY5HNi5vzWinmS15b+exZBBI/HsEh7z6yHk+XldpMP7gu4rwQzhFNr5pu
+      enDhYDiAkXBGYfartKfIVbVf3RmmgbbYU1yIiQ/WqaE0Iu6wniNCEUQ7qz4TiRCf
+      JjT/glo1YOv95Wv606v3DJz6jIH+ZaHEO/99JE3SEfXDipK5ETApv2Sq+t7eYydA
+      Ydyu1c6UsOwktHziWWMbZHovbLfZKQIDAQABo1UwUzBRBgNVHREBAf8ERzBFgkNI
+      OWFzOGU5YnRzUWR2RUJSSWQ1OTFGVXdWN0dlSWpkcThST3R4cERoLnNlbGYtc2ln
+      bmVkLmdvYXV0aGVudGlrLmlvMA0GCSqGSIb3DQEBCwUAA4ICAQCtdmtzXK74n0hA
+      tndXurMvifBU7D7Lv2mu4lR9FKVDGOVy2nCxkGoRta5PdLyMeENfb9olQ0O7pPG0
+      pQr9RVjt3Hn7hKjkrJlcXxACk3W8VsXCP18Ngq5q3yngSzVFp2Bp8jMvD08zO/yP
+      oov5GAQXQ3ARuwZgXL6UW55B+rNFCDXbPw3ANq2DNAc636u6rGvKWFj3geRhlwEg
+      kmLO+nAxUCIuzlJ+WuyJPgkIWlrE8V6v0cIhKy6WO0PFAqle99XFLiIO+VLyUeo3
+      iaDTMQYsG280kPDrdLw7Rw20YlJsiivMRyn/u212XOb9dZ7ajKfSQP6hHvUej1wY
+      Ex48aUCn8Hn+jqdKvo+XWqbAYQIgu8WeE3d05mX6Y97zAikfPrdL1/ZjJHjsmRT3
+      GzoQeBeKmXYoTnKj50RPx5H5bKSugWEGnpRTfJ93i2ILPS7TjqptDLOfl0Clz49z
+      TiARrxFXAuPMlcBj6mTdpbiFjafB/yvDJTioHnw9Fu/4UoYcK5nUGQ63uHFX1R+M
+      wYaFJ//VBeeZ7Z2bFNTXR0XcG6eI2ubhB+JNrtAa0O0u9NqClTtQ1WKKv9rA9cVc
+      r3bMWO3ti5CPXMJSzC5ud5ALTal9h4sDLBC5RLe2+YAcJ5DSIiIwOfVD1yzDM1I4
+      ZXrIHr1+99YTXY9QuNIBf/q+ixd/hQ==
+      -----END CERTIFICATE-----
   # Compared with the pinned certificate hourly; a mismatch only logs.
   - name: BRIDGE_OIDC_JWKS_URL
     value: "http://platform-authentik-server.authentik.svc.cluster.local/application/o/ukubi-bridge-api/jwks/"
@@ -146,3 +189,16 @@ securityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: [ALL]
+
+# Only the Forgejo host may reach /webhook/forgejo (ingress.extraRoutes.forgejo).
+extraManifests:
+  - |
+    apiVersion: traefik.io/v1alpha1
+    kind: Middleware
+    metadata:
+      name: forgejo-only
+      namespace: ukubi-bridge
+    spec:
+      ipAllowList:
+        sourceRange:
+          - 192.168.1.214/32
