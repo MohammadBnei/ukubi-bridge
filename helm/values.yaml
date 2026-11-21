@@ -99,9 +99,7 @@ env:
           "subscribe": [{"types": ["dev.bnei.fleet.session."], "subjects": ["fleet/client/game/"]},
                         {"types": ["dev.bnei.alert."], "subjects": [""]}]},
         "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
-          "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]},
-        "bridge-atlas": {"kind": "machine", "publish_types": [], "publish_subjects": [], "tag": true,
-          "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]}
+          "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]}
       }
   - name: BRIDGE_OIDC_ISSUER
     value: "https://authentik.bnei.dev/application/o/ukubi-bridge-api/"
