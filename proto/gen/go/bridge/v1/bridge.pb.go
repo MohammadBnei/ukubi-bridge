@@ -291,7 +291,23 @@ type SubscribeRequest struct {
 	Types []string `protobuf:"bytes,2,rep,name=types,proto3" json:"types,omitempty"`
 	// Subject globs: '*' matches any run of characters ('/' included), '?' one.
 	// Empty matches every subject.
-	Subjects      []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
+	Subjects []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
+	// Systems, as tagged by Tag. Empty: no system filter. Otherwise only events
+	// with a tag naming one of them at resolution applied (or one opted into
+	// with resolutions), among the tags of the event's current registry version
+	// (the one whose first tag arrived last; an older version's tags no longer
+	// count). Delivery stays in log order and waits for the tag: when the next
+	// event is not tagged yet, the stream holds it (head of line) for the
+	// bridge's grace window (BRIDGE_TAG_GRACE, default 60s), then moves past it
+	// and every untagged event after it whose window has passed too, records
+	// them as a gap and ends Aborted (key stream.gapped): reconnect, and the gap
+	// comes first, as for retention. An event tagged after the stream moved past
+	// it is not delivered (Replay sees it).
+	Systems []string `protobuf:"bytes,4,rep,name=systems,proto3" json:"systems,omitempty"`
+	// Resolutions accepted besides applied, which alone may route a wake by
+	// default: any of tracked, placement, manager. ambiguous and unresolved
+	// never match. Only with systems.
+	Resolutions   []string `protobuf:"bytes,5,rep,name=resolutions,proto3" json:"resolutions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -347,14 +363,33 @@ func (x *SubscribeRequest) GetSubjects() []string {
 	return nil
 }
 
+func (x *SubscribeRequest) GetSystems() []string {
+	if x != nil {
+		return x.Systems
+	}
+	return nil
+}
+
+func (x *SubscribeRequest) GetResolutions() []string {
+	if x != nil {
+		return x.Resolutions
+	}
+	return nil
+}
+
 type SubscribeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Unset on the message that carries a gap.
 	Event *CloudEvent `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
 	// Sent first when retention deleted matching events this subscription
-	// never acked: resync from your own source of truth, then ConfirmGap with
-	// its version. Sent again on every reconnect until confirmed.
-	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
+	// never acked, or a System filter moved past untagged events: resync from
+	// your own source of truth, then ConfirmGap with its version. Sent again on
+	// every reconnect until confirmed.
+	Gap *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
+	// The event's current tag set (the rows of its current registry version),
+	// on every subscription, filtered or not; empty when it is untagged. Check
+	// the resolution before acting on it.
+	Tags          []*EventTag `protobuf:"bytes,3,rep,name=tags,proto3" json:"tags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -399,6 +434,13 @@ func (x *SubscribeResponse) GetEvent() *CloudEvent {
 func (x *SubscribeResponse) GetGap() *Gap {
 	if x != nil {
 		return x.Gap
+	}
+	return nil
+}
+
+func (x *SubscribeResponse) GetTags() []*EventTag {
+	if x != nil {
+		return x.Tags
 	}
 	return nil
 }
@@ -800,7 +842,10 @@ type ReplayResponse struct {
 	// Sent first when from_seq is at or below the retention watermark: events
 	// in it may have been deleted; what follows is what is kept (parked events
 	// included).
-	Gap           *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
+	Gap *Gap `protobuf:"bytes,2,opt,name=gap,proto3" json:"gap,omitempty"`
+	// The event's current tag set, as on SubscribeResponse. Replay never sends
+	// an untagged event to a System-filtered subscription.
+	Tags          []*EventTag `protobuf:"bytes,3,rep,name=tags,proto3" json:"tags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -849,6 +894,173 @@ func (x *ReplayResponse) GetGap() *Gap {
 	return nil
 }
 
+func (x *ReplayResponse) GetTags() []*EventTag {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+type TagRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tags          []*EventTag            `protobuf:"bytes,1,rep,name=tags,proto3" json:"tags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TagRequest) Reset() {
+	*x = TagRequest{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TagRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TagRequest) ProtoMessage() {}
+
+func (x *TagRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TagRequest.ProtoReflect.Descriptor instead.
+func (*TagRequest) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *TagRequest) GetTags() []*EventTag {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+// EventTag is one System an event resolved to (conception §5). A tag for the
+// same seq, system and registry_version replaces the earlier one.
+type EventTag struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The event's log position.
+	Seq int64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	// An ArgoCD Application, or an atlas component where none exists. Empty
+	// exactly when resolution is unresolved.
+	System string `protobuf:"bytes,2,opt,name=system,proto3" json:"system,omitempty"`
+	// The cascade rung that placed it: applied, tracked, placement, manager;
+	// or ambiguous, or unresolved. There is no namespace rung.
+	Resolution string `protobuf:"bytes,3,opt,name=resolution,proto3" json:"resolution,omitempty"`
+	// The registry version the resolver used (the infra-bootstrap sha and the
+	// ArgoCD resource-list snapshot id): a new version may tag the event again,
+	// and then only the version whose first tag arrived last counts for a
+	// System filter; re-sending an older version's tags does not make it
+	// current again.
+	RegistryVersion string `protobuf:"bytes,4,opt,name=registry_version,json=registryVersion,proto3" json:"registry_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *EventTag) Reset() {
+	*x = EventTag{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventTag) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventTag) ProtoMessage() {}
+
+func (x *EventTag) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventTag.ProtoReflect.Descriptor instead.
+func (*EventTag) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *EventTag) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *EventTag) GetSystem() string {
+	if x != nil {
+		return x.System
+	}
+	return ""
+}
+
+func (x *EventTag) GetResolution() string {
+	if x != nil {
+		return x.Resolution
+	}
+	return ""
+}
+
+func (x *EventTag) GetRegistryVersion() string {
+	if x != nil {
+		return x.RegistryVersion
+	}
+	return ""
+}
+
+type TagResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TagResponse) Reset() {
+	*x = TagResponse{}
+	mi := &file_bridge_v1_bridge_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TagResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TagResponse) ProtoMessage() {}
+
+func (x *TagResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bridge_v1_bridge_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TagResponse.ProtoReflect.Descriptor instead.
+func (*TagResponse) Descriptor() ([]byte, []int) {
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{16}
+}
+
 // ErrorKey rides as a detail on every error a BridgeService handler returns
 // (mountain plan/15 §4): a stable key from the bridge's closed registry
 // (internal/bus/errkeys.go, listed in README.md), which a client branches on
@@ -868,7 +1080,7 @@ type ErrorKey struct {
 
 func (x *ErrorKey) Reset() {
 	*x = ErrorKey{}
-	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -880,7 +1092,7 @@ func (x *ErrorKey) String() string {
 func (*ErrorKey) ProtoMessage() {}
 
 func (x *ErrorKey) ProtoReflect() protoreflect.Message {
-	mi := &file_bridge_v1_bridge_proto_msgTypes[14]
+	mi := &file_bridge_v1_bridge_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -893,7 +1105,7 @@ func (x *ErrorKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorKey.ProtoReflect.Descriptor instead.
 func (*ErrorKey) Descriptor() ([]byte, []int) {
-	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{14}
+	return file_bridge_v1_bridge_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ErrorKey) GetKey() string {
@@ -937,14 +1149,17 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x0ePublishRequest\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\"/\n" +
 	"\x0fPublishResponse\x12\x1c\n" +
-	"\tduplicate\x18\x01 \x01(\bR\tduplicate\"X\n" +
+	"\tduplicate\x18\x01 \x01(\bR\tduplicate\"\x94\x01\n" +
 	"\x10SubscribeRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05types\x18\x02 \x03(\tR\x05types\x12\x1a\n" +
-	"\bsubjects\x18\x03 \x03(\tR\bsubjects\"b\n" +
+	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12\x18\n" +
+	"\asystems\x18\x04 \x03(\tR\asystems\x12 \n" +
+	"\vresolutions\x18\x05 \x03(\tR\vresolutions\"\x8b\x01\n" +
 	"\x11SubscribeResponse\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\x12 \n" +
-	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\"Q\n" +
+	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\x12'\n" +
+	"\x04tags\x18\x03 \x03(\v2\x13.bridge.v1.EventTagR\x04tags\"Q\n" +
 	"\x03Gap\x12\x19\n" +
 	"\bfrom_seq\x18\x01 \x01(\x03R\afromSeq\x12\x15\n" +
 	"\x06to_seq\x18\x02 \x01(\x03R\x05toSeq\x12\x18\n" +
@@ -965,13 +1180,25 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\fNackResponse\"N\n" +
 	"\rReplayRequest\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\tR\fsubscription\x12\x19\n" +
-	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\"_\n" +
+	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\"\x88\x01\n" +
 	"\x0eReplayResponse\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\x12 \n" +
-	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\"4\n" +
+	"\x03gap\x18\x02 \x01(\v2\x0e.bridge.v1.GapR\x03gap\x12'\n" +
+	"\x04tags\x18\x03 \x03(\v2\x13.bridge.v1.EventTagR\x04tags\"5\n" +
+	"\n" +
+	"TagRequest\x12'\n" +
+	"\x04tags\x18\x01 \x03(\v2\x13.bridge.v1.EventTagR\x04tags\"\x7f\n" +
+	"\bEventTag\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x16\n" +
+	"\x06system\x18\x02 \x01(\tR\x06system\x12\x1e\n" +
+	"\n" +
+	"resolution\x18\x03 \x01(\tR\n" +
+	"resolution\x12)\n" +
+	"\x10registry_version\x18\x04 \x01(\tR\x0fregistryVersion\"\r\n" +
+	"\vTagResponse\"4\n" +
 	"\bErrorKey\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x16\n" +
-	"\x06source\x18\x02 \x01(\tR\x06source2\x96\x03\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source2\xcc\x03\n" +
 	"\rBridgeService\x12@\n" +
 	"\aPublish\x12\x19.bridge.v1.PublishRequest\x1a\x1a.bridge.v1.PublishResponse\x12H\n" +
 	"\tSubscribe\x12\x1b.bridge.v1.SubscribeRequest\x1a\x1c.bridge.v1.SubscribeResponse0\x01\x124\n" +
@@ -979,7 +1206,8 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\x04Nack\x12\x16.bridge.v1.NackRequest\x1a\x17.bridge.v1.NackResponse\x12?\n" +
 	"\x06Replay\x12\x18.bridge.v1.ReplayRequest\x1a\x19.bridge.v1.ReplayResponse0\x01\x12I\n" +
 	"\n" +
-	"ConfirmGap\x12\x1c.bridge.v1.ConfirmGapRequest\x1a\x1d.bridge.v1.ConfirmGapResponseBFZDgithub.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1;bridgev1b\x06proto3"
+	"ConfirmGap\x12\x1c.bridge.v1.ConfirmGapRequest\x1a\x1d.bridge.v1.ConfirmGapResponse\x124\n" +
+	"\x03Tag\x12\x15.bridge.v1.TagRequest\x1a\x16.bridge.v1.TagResponseBFZDgithub.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1;bridgev1b\x06proto3"
 
 var (
 	file_bridge_v1_bridge_proto_rawDescOnce sync.Once
@@ -993,7 +1221,7 @@ func file_bridge_v1_bridge_proto_rawDescGZIP() []byte {
 	return file_bridge_v1_bridge_proto_rawDescData
 }
 
-var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_bridge_v1_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*CloudEvent)(nil),            // 0: bridge.v1.CloudEvent
 	(*PublishRequest)(nil),        // 1: bridge.v1.PublishRequest
@@ -1009,33 +1237,41 @@ var file_bridge_v1_bridge_proto_goTypes = []any{
 	(*NackResponse)(nil),          // 11: bridge.v1.NackResponse
 	(*ReplayRequest)(nil),         // 12: bridge.v1.ReplayRequest
 	(*ReplayResponse)(nil),        // 13: bridge.v1.ReplayResponse
-	(*ErrorKey)(nil),              // 14: bridge.v1.ErrorKey
-	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*TagRequest)(nil),            // 14: bridge.v1.TagRequest
+	(*EventTag)(nil),              // 15: bridge.v1.EventTag
+	(*TagResponse)(nil),           // 16: bridge.v1.TagResponse
+	(*ErrorKey)(nil),              // 17: bridge.v1.ErrorKey
+	(*timestamppb.Timestamp)(nil), // 18: google.protobuf.Timestamp
 }
 var file_bridge_v1_bridge_proto_depIdxs = []int32{
-	15, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
+	18, // 0: bridge.v1.CloudEvent.time:type_name -> google.protobuf.Timestamp
 	0,  // 1: bridge.v1.PublishRequest.event:type_name -> bridge.v1.CloudEvent
 	0,  // 2: bridge.v1.SubscribeResponse.event:type_name -> bridge.v1.CloudEvent
 	5,  // 3: bridge.v1.SubscribeResponse.gap:type_name -> bridge.v1.Gap
-	0,  // 4: bridge.v1.ReplayResponse.event:type_name -> bridge.v1.CloudEvent
-	5,  // 5: bridge.v1.ReplayResponse.gap:type_name -> bridge.v1.Gap
-	1,  // 6: bridge.v1.BridgeService.Publish:input_type -> bridge.v1.PublishRequest
-	3,  // 7: bridge.v1.BridgeService.Subscribe:input_type -> bridge.v1.SubscribeRequest
-	6,  // 8: bridge.v1.BridgeService.Ack:input_type -> bridge.v1.AckRequest
-	10, // 9: bridge.v1.BridgeService.Nack:input_type -> bridge.v1.NackRequest
-	12, // 10: bridge.v1.BridgeService.Replay:input_type -> bridge.v1.ReplayRequest
-	8,  // 11: bridge.v1.BridgeService.ConfirmGap:input_type -> bridge.v1.ConfirmGapRequest
-	2,  // 12: bridge.v1.BridgeService.Publish:output_type -> bridge.v1.PublishResponse
-	4,  // 13: bridge.v1.BridgeService.Subscribe:output_type -> bridge.v1.SubscribeResponse
-	7,  // 14: bridge.v1.BridgeService.Ack:output_type -> bridge.v1.AckResponse
-	11, // 15: bridge.v1.BridgeService.Nack:output_type -> bridge.v1.NackResponse
-	13, // 16: bridge.v1.BridgeService.Replay:output_type -> bridge.v1.ReplayResponse
-	9,  // 17: bridge.v1.BridgeService.ConfirmGap:output_type -> bridge.v1.ConfirmGapResponse
-	12, // [12:18] is the sub-list for method output_type
-	6,  // [6:12] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	15, // 4: bridge.v1.SubscribeResponse.tags:type_name -> bridge.v1.EventTag
+	0,  // 5: bridge.v1.ReplayResponse.event:type_name -> bridge.v1.CloudEvent
+	5,  // 6: bridge.v1.ReplayResponse.gap:type_name -> bridge.v1.Gap
+	15, // 7: bridge.v1.ReplayResponse.tags:type_name -> bridge.v1.EventTag
+	15, // 8: bridge.v1.TagRequest.tags:type_name -> bridge.v1.EventTag
+	1,  // 9: bridge.v1.BridgeService.Publish:input_type -> bridge.v1.PublishRequest
+	3,  // 10: bridge.v1.BridgeService.Subscribe:input_type -> bridge.v1.SubscribeRequest
+	6,  // 11: bridge.v1.BridgeService.Ack:input_type -> bridge.v1.AckRequest
+	10, // 12: bridge.v1.BridgeService.Nack:input_type -> bridge.v1.NackRequest
+	12, // 13: bridge.v1.BridgeService.Replay:input_type -> bridge.v1.ReplayRequest
+	8,  // 14: bridge.v1.BridgeService.ConfirmGap:input_type -> bridge.v1.ConfirmGapRequest
+	14, // 15: bridge.v1.BridgeService.Tag:input_type -> bridge.v1.TagRequest
+	2,  // 16: bridge.v1.BridgeService.Publish:output_type -> bridge.v1.PublishResponse
+	4,  // 17: bridge.v1.BridgeService.Subscribe:output_type -> bridge.v1.SubscribeResponse
+	7,  // 18: bridge.v1.BridgeService.Ack:output_type -> bridge.v1.AckResponse
+	11, // 19: bridge.v1.BridgeService.Nack:output_type -> bridge.v1.NackResponse
+	13, // 20: bridge.v1.BridgeService.Replay:output_type -> bridge.v1.ReplayResponse
+	9,  // 21: bridge.v1.BridgeService.ConfirmGap:output_type -> bridge.v1.ConfirmGapResponse
+	16, // 22: bridge.v1.BridgeService.Tag:output_type -> bridge.v1.TagResponse
+	16, // [16:23] is the sub-list for method output_type
+	9,  // [9:16] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_bridge_v1_bridge_proto_init() }
@@ -1049,7 +1285,7 @@ func file_bridge_v1_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridge_v1_bridge_proto_rawDesc), len(file_bridge_v1_bridge_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   15,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

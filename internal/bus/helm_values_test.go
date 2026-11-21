@@ -22,9 +22,21 @@ func TestHelmClientTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	core, game, push := cs["bridge-core"], cs["bridge-game"], cs["bridge-push"]
-	if !core.Privileged || game.Privileged || push.Privileged {
-		t.Fatal("only bridge-core is privileged")
+	core, game, push, atlas := cs["bridge-core"], cs["bridge-game"], cs["bridge-push"], cs["bridge-atlas"]
+	for name, c := range cs {
+		if c.Privileged != (name == "bridge-core") {
+			t.Errorf("%s: privileged %v; only bridge-core is", name, c.Privileged)
+		}
+		if c.Tag != (name == "bridge-atlas") {
+			t.Errorf("%s: tag %v; only bridge-atlas tags", name, c.Tag)
+		}
+	}
+	// Atlas reads every type, Forgejo's included, and publishes nothing.
+	if len(atlas.PublishTypes)+len(atlas.PublishSubjects) != 0 || !atlas.mayRead([]string{"dev.bnei."}, nil) {
+		t.Errorf("bridge-atlas: %+v", atlas)
+	}
+	if !core.mayRead([]string{"dev.bnei.forge.", "dev.bnei.github."}, nil) {
+		t.Error("bridge-core reads the forge events")
 	}
 	// No rule of core's may reach a human-facing type, on any subject; push's
 	// rules reach only needs_you. Checked on the rule prefixes themselves.

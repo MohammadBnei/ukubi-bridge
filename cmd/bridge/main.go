@@ -76,6 +76,7 @@ func main() {
 	route := func(pattern string, h http.Handler) { mux.Handle(pattern, tel.Handler(pattern, h)) }
 	route("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
 	forgejoRoute(route, st, cfg)
+	bus.TagGrace = cfg.TagGrace
 	api := bus.New(st, clients, tokens)
 	mux.Handle(api.Handler(tel.Interceptors()...))
 
@@ -89,6 +90,12 @@ func main() {
 	go retain(ctx, api, st, cfg.Retention, time.Hour)
 
 	if r := reconciler(st, cfg.App); r != nil {
+		go r.Loop(ctx, 10*time.Minute)
+	}
+	if rc := cfg.Relist; rc != nil {
+		r := &forgejo.Relister{API: rc.URL, TokenFile: rc.TokenFile, Repos: rc.Repos,
+			Policy: github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}, MaxAge: cfg.Retention,
+			Insert: st.Insert, Cursor: st.RelistCursor, SetCursor: st.SetRelistCursor, Client: &http.Client{Timeout: 30 * time.Second}}
 		go r.Loop(ctx, 10*time.Minute)
 	}
 
@@ -271,9 +278,9 @@ func forgejoHandler(st *store.Store, policy github.Policy, secret []byte) http.H
 		}
 		if err != nil {
 			// 503 marks the delivery failed in the webhook's recent deliveries.
-			// Forgejo does not retry on its own and keeps no deliveries API, so
-			// nothing redelivers it: a manual redelivery from that list is the
-			// only recovery until a reconcile loop exists.
+			// Forgejo does not retry on its own and keeps no deliveries API: the
+			// relist loop brings back the facts it can list (factID), on repos it
+			// watches; anything else needs a manual redelivery from that list.
 			slog.Error("forgejo: store", "delivery", delivery, "err", err)
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return

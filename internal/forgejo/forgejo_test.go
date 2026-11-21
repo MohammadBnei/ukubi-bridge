@@ -1,11 +1,14 @@
 package forgejo
 
 import (
+	"cmp"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,13 +97,33 @@ func TestNormalize(t *testing.T) {
 		{"action_run_recover", "action_run_recover", "action_run.recover", "run/117", "MohammadBnei", event.ActorHuman, true, true},
 		{"action_run_failure_fork", "action_run_failure", "action_run.failure", "run/117", "MohammadBnei", event.ActorHuman, true, false},
 	}
+	// The facts the relist loop can see are keyed on their content (factID);
+	// the rest keep the delivery id.
+	const delivery = "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b"
+	const head = "3f1c0a9e5b2d4c6a8e0f1b3d5c7a9e1f2b4d6c8a"
+	ids := map[string]string{
+		"pull_request_opened":              "pr/42/opened",
+		"pull_request_opened_fork":         "pr/42/opened",
+		"pull_request_opened_deleted_fork": "pr/42/opened",
+		"pull_request_closed":              "pr/42/closed/1795253400", // 2026-11-21T09:30:00Z
+		"issues_opened":                    "issue/9/opened",
+		"issue_comment_created":            "comment/901",
+		"pull_request_comment_created":     "comment/901",
+		"pull_request_comment_fork":        "comment/901",
+		"pull_request_comment_no_pr":       "comment/901",
+		"pull_request_review_approved":     "pr/42/review/approved/ukubi-review/" + head + "/" + textSum("LGTM"),
+	}
 	for _, c := range cases {
-		e, err := Normalize(policy, c.kind, "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b", fixture(t, c.fixture), time.Unix(0, 0))
+		e, err := Normalize(policy, c.kind, delivery, fixture(t, c.fixture), time.Unix(0, 0))
 		if err != nil {
 			t.Errorf("%s: %v", c.fixture, err)
 			continue
 		}
-		if e.ID != "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b" || e.Source != "git.bnei.dev/MohammadBnei/editable-blog" ||
+		want := cmp.Or(ids[c.fixture], delivery)
+		if c.typ == "pull_request_review.rejected" {
+			want = e.ID // keyed too; TestReviewIDs pins the form
+		}
+		if e.ID != want || e.Source != "git.bnei.dev/MohammadBnei/editable-blog" ||
 			e.Type != "dev.bnei.forge."+c.typ || e.Subject != home+c.subject {
 			t.Errorf("%s: envelope id=%s source=%s type=%s subject=%s", c.fixture, e.ID, e.Source, e.Type, e.Subject)
 		}
@@ -124,7 +147,59 @@ func TestNormalizeIgnored(t *testing.T) {
 			t.Errorf("%s as %s: err=%v, want ErrIgnored", c.fixture, c.kind, err)
 		}
 	}
-	if _, err := Normalize(policy, "pull_request", "", fixture(t, "pull_request_opened"), time.Unix(0, 0)); err == nil || errors.Is(err, ErrIgnored) {
-		t.Errorf("no delivery id: err=%v, want a refusal", err)
+	if _, err := Normalize(policy, "pull_request", "", fixture(t, "pull_request_opened"), time.Unix(0, 0)); err != nil {
+		t.Errorf("a delivery id is no longer needed for a keyed fact: %v", err)
+	}
+	if _, err := Normalize(policy, "pull_request_sync", "", fixture(t, "pull_request_synchronized"), time.Unix(0, 0)); err == nil || errors.Is(err, ErrIgnored) {
+		t.Errorf("no delivery id on an unkeyed fact: err=%v, want a refusal", err)
+	}
+}
+
+func textSum(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
+// TestReviewIDs: a verdict's key names the verdict, the reviewer, the head and
+// the text, and the relist loop's commit_id wins over the PR's head. A COMMENT
+// review keeps its delivery id: two empty ones by one reviewer on one head
+// (two single inline comments) are two events.
+func TestReviewIDs(t *testing.T) {
+	const head = "3f1c0a9e5b2d4c6a8e0f1b3d5c7a9e1f2b4d6c8a"
+	want := "pr/42/review/rejected/MohammadBnei/" + head + "/"
+	if e, err := Normalize(policy, "pull_request_review_rejected", "d", fixture(t, "pull_request_review_rejected"), time.Unix(0, 0)); err != nil || !strings.HasPrefix(e.ID, want) || len(e.ID) != len(want)+16 {
+		t.Errorf("rejected: id %q (%v), want %s<16 hex>", e.ID, err, want)
+	}
+	var cm map[string]any
+	if err := json.Unmarshal(fixture(t, "pull_request_review_comment"), &cm); err != nil {
+		t.Fatal(err)
+	}
+	cm["review"] = map[string]any{"type": "pull_request_review_comment", "content": ""}
+	empty, _ := json.Marshal(cm)
+	ids := map[string]bool{}
+	for _, d := range []string{"delivery-a", "delivery-b"} {
+		e, err := Normalize(policy, "pull_request_review_comment", d, empty, time.Unix(0, 0))
+		if err != nil || e.ID != d {
+			t.Errorf("empty COMMENT review %s: id %q (%v), want the delivery id", d, e.ID, err)
+		}
+		ids[e.ID] = true
+	}
+	if len(ids) != 2 {
+		t.Errorf("two inline comments on one head: ids %v, want 2", ids)
+	}
+	cm["review"] = map[string]any{"id": 77, "content": ""} // the relist loop's
+	relisted, _ := json.Marshal(cm)
+	if e, err := Normalize(policy, "pull_request_review_comment", "", relisted, time.Unix(0, 0)); err != nil || e.ID != "pr/42/review/comment/77" {
+		t.Errorf("relisted COMMENT review: id %q (%v)", e.ID, err)
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(fixture(t, "pull_request_review_approved"), &pl); err != nil {
+		t.Fatal(err)
+	}
+	pl["commit_id"] = "abc"
+	body, _ := json.Marshal(pl)
+	e, err := Normalize(policy, "pull_request_review_approved", "", body, time.Unix(0, 0))
+	if err != nil || e.ID != "pr/42/review/approved/ukubi-review/abc/"+textSum("LGTM") {
+		t.Errorf("commit_id: %q %v", e.ID, err)
 	}
 }

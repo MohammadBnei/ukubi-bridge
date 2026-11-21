@@ -73,24 +73,35 @@ env:
     value: "MohammadBnei"
   - name: BRIDGE_FORGEJO_AGENT_LOGINS
     value: "ukubi-fleet,ukubi-review"
+  # The Forgejo relist loop: off while the repo list is empty. Its token is
+  # the optional Secret mounted below (read:repository and read:issue only),
+  # read on every run; until that Secret exists the mount is empty and a
+  # non-empty list logs one error per run.
+  - name: BRIDGE_FORGEJO_RELIST_REPOS
+    value: ""
+  - name: BRIDGE_FORGEJO_TOKEN_FILE
+    value: /var/run/secrets/forgejo/token
   # API clients are authentik service accounts (infra-bootstrap ADR-0066):
   # this table holds what each may publish and read, never a secret. Explicit
   # env, so a key of the same name in the envFrom Secret cannot override it.
   # Only bridge-core may be privileged; one subscription's filter must fit one
-  # of its client's rules.
+  # of its client's rules. bridge-atlas reads every type to resolve Systems and
+  # tags events with them (Tag); it publishes nothing.
   - name: BRIDGE_API_CLIENTS
     value: |
       {
         "bridge-core": {"kind": "agent", "privileged": true,
           "publish_types": ["dev.bnei.agent.", "dev.bnei.fleet.session."],
           "publish_subjects": ["fleet/", "github/", "alert/", "agent/"],
-          "subscribe": [{"types": ["dev.bnei.github.", "dev.bnei.alert.", "dev.bnei.agent."], "subjects": [""]}]},
+          "subscribe": [{"types": ["dev.bnei.github.", "dev.bnei.forge.", "dev.bnei.alert.", "dev.bnei.agent."], "subjects": [""]}]},
         "bridge-game": {"kind": "bot",
           "publish_types": ["dev.bnei.game."], "publish_subjects": ["game/"],
           "subscribe": [{"types": ["dev.bnei.fleet.session."], "subjects": ["fleet/client/game/"]},
                         {"types": ["dev.bnei.alert."], "subjects": [""]}]},
         "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
-          "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]}
+          "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]},
+        "bridge-atlas": {"kind": "machine", "publish_types": [], "publish_subjects": [], "tag": true,
+          "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]}
       }
   - name: BRIDGE_OIDC_ISSUER
     value: "https://authentik.bnei.dev/application/o/ukubi-bridge-api/"
@@ -176,6 +187,19 @@ resources:
     memory: 32Mi
   limits:
     memory: 128Mi
+
+# The relist loop's Forgejo token, from a Secret infra-bootstrap does not
+# render yet: optional, so the pod starts without it.
+extraVolumes:
+  - name: forgejo-token
+    secret:
+      secretName: ukubi-bridge-forgejo-token
+      optional: true
+      defaultMode: 0400
+extraVolumeMounts:
+  - name: forgejo-token
+    mountPath: /var/run/secrets/forgejo
+    readOnly: true
 
 # distroless static:nonroot runs as 65532. Nothing writes to disk.
 podSecurityContext:

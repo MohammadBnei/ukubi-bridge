@@ -97,3 +97,64 @@ BEGIN
   END IF;
 END
 $$;
+
+-- The Forgejo relist loop's cursor, per watched repo: where its last good run
+-- started (internal/forgejo/relist.go).
+CREATE TABLE IF NOT EXISTS forge_relist (
+    repo  text        PRIMARY KEY,
+    since timestamptz NOT NULL
+);
+
+-- System tags (conception §5, §6): atlas computes them as a bridge client and
+-- attaches them with Tag; the bridge stores them, never computes one, and
+-- never writes a System into the event. One row per event, System and
+-- registry version: a new version tags the event again. Retention deletes an
+-- event's tags with it.
+CREATE TABLE IF NOT EXISTS event_tags (
+    event_id         bigint      NOT NULL REFERENCES events (id) ON DELETE CASCADE,
+    system           text        NOT NULL,
+    -- The cascade rung (no namespace rung), or no answer.
+    resolution       text        NOT NULL
+        CHECK (resolution IN ('applied', 'tracked', 'placement', 'manager', 'ambiguous', 'unresolved')),
+    registry_version text        NOT NULL CHECK (registry_version <> ''),
+    tagged_at        timestamptz NOT NULL DEFAULT now(),
+    tagger           text        NOT NULL, -- the client that tagged
+    PRIMARY KEY (event_id, system, registry_version),
+    CHECK ((system = '') = (resolution = 'unresolved'))
+);
+-- Arrival order, assigned at insert and kept when a re-tag replaces the row:
+-- an event's current version is the one whose first row arrived last, so a
+-- late retry of an older version never makes it current again.
+-- ponytail: insert order, not commit order: two concurrent Tag calls for one
+-- event with different versions are ordered by when each inserted. Have atlas
+-- send an ordered registry generation if that ever matters.
+ALTER TABLE event_tags ADD COLUMN IF NOT EXISTS arrival bigserial;
+
+CREATE OR REPLACE FUNCTION bridge_tag_version(event_id bigint) RETURNS text
+LANGUAGE sql STABLE AS $$
+    SELECT registry_version FROM event_tags WHERE event_tags.event_id = $1
+    GROUP BY registry_version ORDER BY min(arrival) DESC LIMIT 1
+$$;
+
+-- A subscription's System filter: empty matches everything, else an event
+-- needs a row of its current version naming one of the systems at resolution
+-- applied, or at one of the resolutions the subscription opted into (never
+-- ambiguous or unresolved). Delivery and retention both read it, as
+-- bridge_matches.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS systems text[] NOT NULL DEFAULT '{}';
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS resolutions text[] NOT NULL DEFAULT '{}';
+DROP FUNCTION IF EXISTS bridge_tagged(text[], bigint); -- before resolutions
+CREATE OR REPLACE FUNCTION bridge_tagged(systems text[], resolutions text[], event_id bigint) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+    SELECT cardinality(systems) = 0 OR EXISTS (SELECT 1 FROM event_tags t
+        WHERE t.event_id = $3 AND t.system = ANY ($1)
+          AND t.resolution = ANY ($2 || 'applied'::text) AND t.resolution NOT IN ('ambiguous', 'unresolved')
+          AND t.registry_version = bridge_tag_version($3))
+$$;
+-- An event a System-filtered subscription cannot judge yet: it has no tag at
+-- all. Delivery holds it for the grace window, then gaps it; retention counts
+-- it as the subscription's loss. Never skipped in silence.
+CREATE OR REPLACE FUNCTION bridge_untagged(systems text[], event_id bigint) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+    SELECT cardinality(systems) > 0 AND NOT EXISTS (SELECT 1 FROM event_tags t WHERE t.event_id = $2)
+$$;

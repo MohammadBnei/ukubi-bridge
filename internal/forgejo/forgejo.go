@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -62,10 +63,13 @@ type repo struct {
 }
 
 type pull struct {
-	Number int  `json:"number"`
-	User   user `json:"user"`
-	Head   struct {
-		Repo *repo `json:"repo"` // nil when the fork was deleted
+	Number   int        `json:"number"`
+	User     user       `json:"user"`
+	State    string     `json:"state"`
+	ClosedAt *time.Time `json:"closed_at"`
+	Head     struct {
+		Sha  string `json:"sha"`
+		Repo *repo  `json:"repo"` // nil when the fork was deleted
 	} `json:"head"`
 }
 
@@ -80,8 +84,16 @@ type payload struct {
 	} `json:"issue"`
 	IsPull  bool `json:"is_pull"`
 	Comment *struct {
-		User user `json:"user"`
+		ID   int64 `json:"id"`
+		User user  `json:"user"`
 	} `json:"comment"`
+	// A review delivery carries no review id or time (factID); the relist
+	// loop sets id from the reviews API.
+	Review *struct {
+		ID      int64  `json:"id"`
+		Content string `json:"content"`
+	} `json:"review"`
+	CommitID string `json:"commit_id"` // set by the relist loop only: the head the review was made on
 	// An action_run_* payload has no repository or sender at the top level.
 	Run *struct {
 		Index             int  `json:"index_in_repo"`
@@ -95,7 +107,8 @@ type payload struct {
 // X-Forgejo-Event-Type, delivery is X-Forgejo-Delivery. The bus type is
 // dev.bnei.forge.<event>.<action>, where a review is
 // pull_request_review.approved|rejected|comment and a run is
-// action_run.success|failure|recover.
+// action_run.success|failure|recover. ce_id is factID's key when the fact has
+// one, else the delivery id; a relisted fact has no delivery id.
 func Normalize(p github.Policy, kind, delivery string, body []byte, now time.Time) (event.Event, error) {
 	var pl payload
 	if err := json.Unmarshal(body, &pl); err != nil {
@@ -107,8 +120,8 @@ func Normalize(p github.Policy, kind, delivery string, body []byte, now time.Tim
 	if pl.Run != nil {
 		pl.Repository = pl.Run.Repository
 	}
-	if pl.Repository.FullName == "" || delivery == "" {
-		return event.Event{}, errors.New("missing repository or delivery id")
+	if pl.Repository.FullName == "" {
+		return event.Event{}, errors.New("missing repository")
 	}
 
 	// The actor and author rules are github.Normalize's: opened is the
@@ -194,8 +207,20 @@ func Normalize(p github.Policy, kind, delivery string, body []byte, now time.Tim
 		kindOf = event.ActorAgent
 	}
 
+	id := factID(name, action, pl)
+	if id == "" {
+		id = delivery
+	}
+	if name == "pull_request" && action == "closed" && pl.PullRequest.ClosedAt == nil {
+		// Its relisted copy is keyed pr/<n>/closed/<t>: this one is stored twice.
+		slog.Warn("forgejo: closed pull_request without closed_at; keyed by delivery", "delivery", delivery, "pr", pl.PullRequest.Number)
+	}
+	if id == "" {
+		return event.Event{}, errors.New("missing delivery id")
+	}
+
 	return event.Event{
-		ID:           delivery,
+		ID:           id,
 		Source:       "git.bnei.dev/" + pl.Repository.FullName,
 		Type:         "dev.bnei.forge." + name + "." + action,
 		Subject:      subject,
@@ -206,4 +231,59 @@ func Normalize(p github.Policy, kind, delivery string, body []byte, now time.Tim
 		ActorTrusted: actorTrusted,
 		ThreadOwned:  threadOwned,
 	}, nil
+}
+
+// factID is the ce_id of a fact the relist loop can also see (relist.go), built
+// from the fact itself, so its webhook delivery and its relisted copy are one
+// event on (source, ce_id), in either order and across restarts:
+//
+//	pr/<n>/opened                 issue/<n>/opened
+//	pr/<n>/closed/<closed_at unix>  (a merge too; reopened and closed again is a new fact)
+//	comment/<comment id>
+//	pr/<n>/review/<approved|rejected>/<reviewer>/<head sha>/<sha256(text)[:8] hex>
+//	pr/<n>/review/comment/<review id>  (relisted only)
+//
+// A verdict delivery has no review id, so its head is the PR's head at
+// delivery, and the relisted one's the review's commit_id: a verdict submitted
+// on a head that moved before it landed is stored twice. The same verdict with
+// the same text by one reviewer on one head is one fact, which a verdict is.
+//
+// A COMMENT review is not content-keyed: Forgejo submits every single inline
+// code comment as its own empty COMMENT review, so one reviewer's second
+// inline comment on a head would read as the first's duplicate and be
+// dropped. Its delivery keeps X-Forgejo-Delivery ("" here), its relisted copy
+// the review id, so a relist stores a COMMENT review the webhook already
+// stored a second time: the recovery path may duplicate, the live one must
+// not drop. "" for the rest too (synchronized, reopened, label_updated, runs),
+// which keep the delivery id: the relist loop cannot see them.
+func factID(name, action string, pl payload) string {
+	switch {
+	case name == "pull_request" && action == "opened":
+		return fmt.Sprintf("pr/%d/opened", pl.PullRequest.Number)
+	case name == "pull_request" && action == "closed" && pl.PullRequest.ClosedAt != nil:
+		return fmt.Sprintf("pr/%d/closed/%d", pl.PullRequest.Number, pl.PullRequest.ClosedAt.Unix())
+	case name == "issues" && action == "opened":
+		return fmt.Sprintf("issue/%d/opened", pl.Issue.Number)
+	case name == "issue_comment" && pl.Comment.ID != 0:
+		return fmt.Sprintf("comment/%d", pl.Comment.ID)
+	case name == "pull_request_review" && action == "comment":
+		if pl.Review != nil && pl.Review.ID != 0 {
+			return fmt.Sprintf("pr/%d/review/comment/%d", pl.PullRequest.Number, pl.Review.ID)
+		}
+	case name == "pull_request_review":
+		sha := pl.CommitID
+		if sha == "" {
+			sha = pl.PullRequest.Head.Sha
+		}
+		if sha == "" || pl.Sender.Login == "" {
+			return ""
+		}
+		var text string
+		if pl.Review != nil {
+			text = pl.Review.Content
+		}
+		sum := sha256.Sum256([]byte(text))
+		return fmt.Sprintf("pr/%d/review/%s/%s/%s/%x", pl.PullRequest.Number, action, pl.Sender.Login, sha, sum[:8])
+	}
+	return ""
 }

@@ -144,18 +144,24 @@ func Invalid(err error) bool {
 // matching events in it (infra-bootstrap ADR-0066 §6).
 type Gap struct{ From, To, Version int64 }
 
+// Filter is what a subscription sees: types are prefixes, subjects globs,
+// systems and resolutions the System filter (schema.sql, bridge_tagged).
+type Filter struct{ Types, Subjects, Systems, Resolutions []string }
+
 // Subscribe creates or refilters subscription name and returns its cursor,
 // any gap it has not confirmed, and its gap version (stored even once confirmed). A new subscription starts at the head of
 // the log: history is Replay's job.
-func (s *Store) Subscribe(ctx context.Context, name string, types, subjects []string) (int64, *Gap, int64, error) {
+func (s *Store) Subscribe(ctx context.Context, name string, f Filter) (int64, *Gap, int64, error) {
 	var cursor, ver int64
 	var from, to *int64
 	err := s.db.QueryRow(ctx, `
-		INSERT INTO subscriptions (name, types, subjects, last_acked_id)
-		VALUES ($1, $2, $3, GREATEST((SELECT coalesce(max(id), 0) FROM events), (SELECT deleted_through FROM retention)))
+		INSERT INTO subscriptions (name, types, subjects, systems, resolutions, last_acked_id)
+		VALUES ($1, $2, $3, $4, $5, GREATEST((SELECT coalesce(max(id), 0) FROM events), (SELECT deleted_through FROM retention)))
 		ON CONFLICT (name) DO UPDATE
-		SET types = excluded.types, subjects = excluded.subjects, last_seen = now()
-		RETURNING last_acked_id, gap_from, gap_to, gap_ver`, name, nonNil(types), nonNil(subjects)).Scan(&cursor, &from, &to, &ver)
+		SET types = excluded.types, subjects = excluded.subjects, systems = excluded.systems,
+		    resolutions = excluded.resolutions, last_seen = now()
+		RETURNING last_acked_id, gap_from, gap_to, gap_ver`,
+		name, nonNil(f.Types), nonNil(f.Subjects), nonNil(f.Systems), nonNil(f.Resolutions)).Scan(&cursor, &from, &to, &ver)
 	if err != nil || from == nil || to == nil {
 		return cursor, nil, ver, err
 	}
@@ -174,19 +180,30 @@ func (s *Store) Filter(ctx context.Context, name string) (types, subjects []stri
 // Delivery is an event as one subscription sees it.
 type Delivery struct {
 	event.Event
-	Parked bool // its subject has an uncleared dead letter for this subscription
+	Parked bool  // its subject has an uncleared dead letter for this subscription
+	Tags   []Tag // its current tag set: the rows of its current registry version
+	// Untagged: the subscription has a System filter and the event no tag
+	// yet, so it can be neither delivered nor passed over (bridge_untagged).
+	Untagged   bool
+	IngestedAt time.Time
 }
 
 // Match returns up to limit events after cursor that match subscription
-// name's filters, in log order.
+// name's filters, in log order, and, for a System filter, the untagged events
+// among them (Delivery.Untagged).
 func (s *Store) Match(ctx context.Context, name string, after int64, limit int) ([]Delivery, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT e.id, e.source, e.ce_id, e.type, e.subject, e.time, e.data, e.actor, e.actor_login,
 		       e.actor_trusted, e.thread_owned, e.owner, e.hops, e.causation_id,
 		       EXISTS (SELECT 1 FROM dead_letters d
-		               WHERE d.subscription = s.name AND d.subject = e.subject AND d.cleared_at IS NULL)
+		               WHERE d.subscription = s.name AND d.subject = e.subject AND d.cleared_at IS NULL),
+		       bridge_untagged(s.systems, e.id), e.ingested_at, coalesce(cur.v, ''),
+		       ARRAY(SELECT t.system FROM event_tags t WHERE t.event_id = e.id AND t.registry_version = cur.v ORDER BY t.system),
+		       ARRAY(SELECT t.resolution FROM event_tags t WHERE t.event_id = e.id AND t.registry_version = cur.v ORDER BY t.system)
 		FROM subscriptions s JOIN events e ON e.id > $2
+		CROSS JOIN LATERAL (SELECT bridge_tag_version(e.id) AS v) cur
 		WHERE s.name = $1 AND bridge_matches(s.types, s.subjects, e.type, e.subject)
+		  AND (bridge_tagged(s.systems, s.resolutions, e.id) OR bridge_untagged(s.systems, e.id))
 		ORDER BY e.id
 		LIMIT $3`, name, after, limit)
 	if err != nil {
@@ -194,10 +211,39 @@ func (s *Store) Match(ctx context.Context, name string, after int64, limit int) 
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Delivery, error) {
 		var d Delivery
+		var version string
+		var systems, resolutions []string
 		err := r.Scan(&d.Seq, &d.Source, &d.ID, &d.Type, &d.Subject, &d.Time, &d.Data, &d.Actor, &d.ActorLogin,
-			&d.ActorTrusted, &d.ThreadOwned, &d.Owner, &d.Hops, &d.CausationID, &d.Parked)
+			&d.ActorTrusted, &d.ThreadOwned, &d.Owner, &d.Hops, &d.CausationID, &d.Parked,
+			&d.Untagged, &d.IngestedAt, &version, &systems, &resolutions)
+		for i := range systems {
+			d.Tags = append(d.Tags, Tag{Seq: d.Seq, System: systems[i], Resolution: resolutions[i], RegistryVersion: version})
+		}
 		return d, err
 	})
+}
+
+// GapUntagged moves subscription name past the untagged event at seq once its
+// grace window has passed, and past every event after it up to the next one
+// it can deliver or still has to wait for (tagged for it, or untagged and
+// within grace), and records them as its gap, as retention does: the
+// subscriber sees it on its next Subscribe and confirms it. false when seq
+// was tagged meanwhile (Match again). An event in the gap may be tagged
+// later: Replay finds it then.
+func (s *Store) GapUntagged(ctx context.Context, name string, seq int64, grace time.Duration) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		WITH next AS (
+			SELECT min(e.id) AS id FROM subscriptions s JOIN events e ON e.id > $2
+			WHERE s.name = $1 AND bridge_matches(s.types, s.subjects, e.type, e.subject)
+			  AND (bridge_tagged(s.systems, s.resolutions, e.id)
+			       OR (bridge_untagged(s.systems, e.id) AND e.ingested_at > now() - $3 * interval '1 second'))),
+		through AS (SELECT coalesce((SELECT id - 1 FROM next), (SELECT max(id) FROM events), $2) AS id)
+		UPDATE subscriptions u SET last_acked_id = GREATEST(u.last_acked_id, t.id), attempts = 0, last_seen = now(),
+			gap_from = LEAST(coalesce(u.gap_from, $2), $2),
+			gap_to   = GREATEST(coalesce(u.gap_to, t.id), t.id),
+			gap_ver  = u.gap_ver + 1
+		FROM through t WHERE u.name = $1 AND bridge_untagged(u.systems, $2)`, name, seq, grace.Seconds())
+	return tag.RowsAffected() == 1, err
 }
 
 // Head is the newest log position.
@@ -339,7 +385,7 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (Pruned, error) {
 		INSERT INTO dead_letters (subscription, event_id, subject, reason)
 		SELECT s.name, e.id, e.subject, 'parked (retention)'
 		FROM subscriptions s JOIN events e ON e.id > s.last_acked_id AND e.id <= $1
-		WHERE bridge_matches(s.types, s.subjects, e.type, e.subject)
+		WHERE bridge_matches(s.types, s.subjects, e.type, e.subject) AND bridge_tagged(s.systems, s.resolutions, e.id)
 		  AND EXISTS (SELECT 1 FROM dead_letters d
 		              WHERE d.subscription = s.name AND d.subject = e.subject AND d.cleared_at IS NULL)
 		ON CONFLICT DO NOTHING`, p.Through); err != nil {
@@ -357,6 +403,8 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (Pruned, error) {
 			               WHERE k.subject = e.subject AND k.cleared_at IS NULL AND k.event_id <= e.id) AS kept
 			FROM subscriptions s JOIN events e ON e.id > s.last_acked_id AND e.id <= $1
 			WHERE bridge_matches(s.types, s.subjects, e.type, e.subject)
+			  -- an untagged event counts: never tagged is never a silent skip
+			  AND (bridge_tagged(s.systems, s.resolutions, e.id) OR bridge_untagged(s.systems, e.id))
 			  AND NOT EXISTS (SELECT 1 FROM dead_letters d WHERE d.subscription = s.name AND d.event_id = e.id)),
 		behind AS (
 			SELECT s.name, s.last_acked_id AS cursor,
@@ -450,4 +498,62 @@ func (s *Store) Known(ctx context.Context, ids []string) (map[string]bool, error
 		m[id] = true
 	}
 	return m, nil
+}
+
+// RelistCursor is where the Forgejo relist loop's last good run for repo
+// started; zero if it never ran.
+func (s *Store) RelistCursor(ctx context.Context, repo string) (time.Time, error) {
+	var t time.Time
+	err := s.db.QueryRow(ctx, `SELECT since FROM forge_relist WHERE repo = $1`, repo).Scan(&t)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	return t, err
+}
+
+// SetRelistCursor stores repo's cursor.
+func (s *Store) SetRelistCursor(ctx context.Context, repo string, t time.Time) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO forge_relist (repo, since) VALUES ($1, $2)
+		ON CONFLICT (repo) DO UPDATE SET since = excluded.since`, repo, t)
+	return err
+}
+
+// Tag is one System tag on a logged event (bridge.v1.EventTag).
+type Tag struct {
+	Seq                                 int64
+	System, Resolution, RegistryVersion string
+}
+
+// ErrNoEvent: a tag names a log position that holds no event (never, or no
+// longer: retention deleted it).
+var ErrNoEvent = errors.New("no event at that position")
+
+// Tag stores tags as tagger's, all or none: one for the same event, System and
+// registry version replaces the earlier. The schema checks the values; Invalid
+// reports a refusal. It wakes the streams, so a System filter sees the event.
+func (s *Store) Tag(ctx context.Context, tagger string, tags []Tag) error {
+	seqs := make([]int64, len(tags))
+	systems, resolutions, versions := make([]string, len(tags)), make([]string, len(tags)), make([]string, len(tags))
+	for i, t := range tags {
+		seqs[i], systems[i], resolutions[i], versions[i] = t.Seq, t.System, t.Resolution, t.RegistryVersion
+	}
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO event_tags (event_id, system, resolution, registry_version, tagger)
+		-- ponytail: a request naming one (event, System, version) twice keeps either.
+		SELECT DISTINCT ON (seq, sys, ver) seq, sys, res, ver, $5
+		FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[]) AS t (seq, sys, res, ver)
+		-- arrival is kept: a re-sent version does not become current again
+		ON CONFLICT (event_id, system, registry_version) DO UPDATE
+		SET resolution = excluded.resolution, tagger = excluded.tagger, tagged_at = now()`,
+		seqs, systems, resolutions, versions, tagger)
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) && pg.Code == "23503" { // foreign_key_violation
+		return fmt.Errorf("%w: %s", ErrNoEvent, pg.Detail)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `SELECT pg_notify($1, '')`, notifyChannel)
+	return err
 }

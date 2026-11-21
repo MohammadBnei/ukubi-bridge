@@ -43,7 +43,8 @@ func (f fakeTokens) Verify(raw string) (string, time.Time, error) {
 }
 
 // nobody is a valid authentik token for an account the table does not list.
-var tokens = fakeTokens{"core-token": "bridge-core", "app-token": "app", "nobody-token": "nobody", "short-token": "bridge-core"}
+var tokens = fakeTokens{"core-token": "bridge-core", "app-token": "app", "nobody-token": "nobody", "short-token": "bridge-core",
+	"atlas-token": "atlas"}
 
 // setup runs the API against its own fresh database, so it never races the
 // store package's TRUNCATE when `go test ./...` runs packages in parallel.
@@ -81,7 +82,9 @@ func setup(t *testing.T) fixture {
 		"bridge-core": {"kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "privileged": true,
 		                "subscribe": [{"types": ["dev."], "subjects": [""]}]},
 		"app":         {"kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"],
-		                "subscribe": [{"types": ["dev.app."], "subjects": ["app/"]}]}
+		                "subscribe": [{"types": ["dev.app."], "subjects": ["app/"]}]},
+		"atlas":       {"publish_types": [], "publish_subjects": [], "tag": true,
+		                "subscribe": [{"types": ["dev."], "subjects": [""]}]}
 	}`)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +96,7 @@ func setup(t *testing.T) fixture {
 	t.Cleanup(srv.Close)
 
 	// PollEvery an hour: deliveries in these tests must come from the NOTIFY nudge.
-	MaxAttempts, RetryBase, PollEvery, MinStreamLife = 5, time.Millisecond, time.Hour, 100*time.Millisecond
+	MaxAttempts, RetryBase, PollEvery, MinStreamLife, TagGrace = 5, time.Millisecond, time.Hour, 100*time.Millisecond, time.Hour
 	return fixture{db: db, api: bridgev1connect.NewBridgeServiceClient(srv.Client(), srv.URL), srv: bus}
 }
 
@@ -583,5 +586,210 @@ func TestMovedAndReplacedStreams(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the replaced stream kept running")
+	}
+}
+
+func (f fixture) tag(tok string, tags ...*bridgev1.EventTag) error {
+	_, err := f.api.Tag(context.Background(), as(tok, &bridgev1.TagRequest{Tags: tags}))
+	return err
+}
+
+// systemStream opens a System-filtered subscription and hands over each
+// message; done gets the stream's end.
+func (f fixture) systemStream(t *testing.T, ctx context.Context, name string, systems, resolutions []string) (<-chan *bridgev1.SubscribeResponse, <-chan error) {
+	t.Helper()
+	stream, err := f.api.Subscribe(ctx, as("core-token", &bridgev1.SubscribeRequest{Name: name, Types: []string{"dev."}, Systems: systems, Resolutions: resolutions}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, done := make(chan *bridgev1.SubscribeResponse, 16), make(chan error, 1)
+	go func() {
+		for stream.Receive() {
+			ch <- stream.Msg()
+		}
+		done <- stream.Err()
+	}()
+	return ch, done
+}
+
+func next(t *testing.T, ch <-chan *bridgev1.SubscribeResponse) *bridgev1.SubscribeResponse {
+	t.Helper()
+	select {
+	case m := <-ch:
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatal("no message")
+		return nil
+	}
+}
+
+func still(t *testing.T, ch <-chan *bridgev1.SubscribeResponse) {
+	t.Helper()
+	select {
+	case m := <-ch:
+		t.Fatalf("unexpected message %+v", m)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func hqTag(seq int64, res string) *bridgev1.EventTag {
+	return &bridgev1.EventTag{Seq: seq, System: "hq", Resolution: res, RegistryVersion: "abc123/snap-1"}
+}
+
+// A System-filtered subscription sees an event once atlas tags it with one of
+// its Systems at applied (or a resolution it opted into), in log order, with
+// the tag beside it; Tag is the tagger's only.
+func TestTagSystems(t *testing.T) {
+	f := setup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, _ := f.systemStream(t, ctx, "bridge-core/hq", []string{"hq"}, nil)
+	for _, id := range []string{"t1", "t2", "t3"} {
+		f.publish(t, "app-token", ev(id, "app/"+id))
+	}
+	still(t, ch) // nothing is tagged yet
+
+	big := make([]*bridgev1.EventTag, maxTags+1)
+	for i := range big {
+		big[i] = hqTag(1, "applied")
+	}
+	for _, c := range []struct {
+		name, tok string
+		tags      []*bridgev1.EventTag
+		code      connect.Code
+		key       string
+	}{
+		{"not a tagger", "core-token", []*bridgev1.EventTag{hqTag(1, "applied")}, connect.CodePermissionDenied, "tag.denied"},
+		{"nothing", "atlas-token", nil, connect.CodeInvalidArgument, "tag.invalid"},
+		{"too many", "atlas-token", big, connect.CodeInvalidArgument, "tag.invalid"},
+		{"long system", "atlas-token", []*bridgev1.EventTag{{Seq: 1, System: strings.Repeat("s", maxTagField+1), Resolution: "applied", RegistryVersion: "v"}}, connect.CodeInvalidArgument, "tag.invalid"},
+		{"namespace rung", "atlas-token", []*bridgev1.EventTag{hqTag(1, "namespace")}, connect.CodeInvalidArgument, "tag.invalid"},
+		// All or none: the good tag beside the missing event is not stored.
+		{"no event", "atlas-token", []*bridgev1.EventTag{hqTag(1, "applied"), hqTag(999, "applied")}, connect.CodeNotFound, "tag.no_event"},
+	} {
+		err := f.tag(c.tok, c.tags...)
+		if k, _, _ := keyOf(err); connect.CodeOf(err) != c.code || k != c.key || !twinned(err) {
+			t.Errorf("%s: %v (key %q), want %s %s", c.name, err, k, c.code, c.key)
+		}
+	}
+	still(t, ch)
+
+	// t2 is ambiguous for hq, t3 only placed there: neither routes by default.
+	// Both are tagged before t1, which still holds the line.
+	if err := f.tag("atlas-token", hqTag(2, "ambiguous"), &bridgev1.EventTag{Seq: 2, System: "kube-system", Resolution: "ambiguous", RegistryVersion: "abc123/snap-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tag("atlas-token", hqTag(3, "placement")); err != nil {
+		t.Fatal(err)
+	}
+	still(t, ch)
+	if err := f.tag("atlas-token", hqTag(1, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	m := next(t, ch)
+	if m.GetEvent().GetId() != "t1" || len(m.Tags) != 1 || m.Tags[0].Resolution != "applied" || m.Tags[0].RegistryVersion != "abc123/snap-1" || m.Tags[0].Seq != 1 {
+		t.Fatalf("got %+v, want t1 with its applied tag", m)
+	}
+	f.ack(t, "bridge-core/hq", 1)
+	still(t, ch)
+
+	replay := func(sub string) string {
+		t.Helper()
+		rs, err := f.api.Replay(context.Background(), as("core-token", &bridgev1.ReplayRequest{Subscription: sub, FromSeq: 1}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for rs.Receive() {
+			got = append(got, rs.Msg().GetEvent().GetId()+"/"+rs.Msg().GetTags()[0].GetResolution())
+		}
+		if rs.Err() != nil {
+			t.Fatal(rs.Err())
+		}
+		return strings.Join(got, ",")
+	}
+	// Replay reads the same filter; opting into placement admits t3.
+	if got := replay("bridge-core/hq"); got != "t1/applied" {
+		t.Errorf("replay %s, want t1/applied", got)
+	}
+	pctx, pcancel := context.WithCancel(ctx)
+	f.systemStream(t, pctx, "bridge-core/hq-placed", []string{"hq"}, []string{"placement"})
+	pcancel()
+	if got := replay("bridge-core/hq-placed"); got != "t1/applied,t3/placement" {
+		t.Errorf("replay with placement %s, want t1/applied,t3/placement", got)
+	}
+
+	// Only tracked, placement and manager can be opted into, and only with systems.
+	for _, req := range []*bridgev1.SubscribeRequest{
+		{Name: "bridge-core/bad", Types: []string{"dev."}, Systems: []string{"hq"}, Resolutions: []string{"ambiguous"}},
+		{Name: "bridge-core/bad", Types: []string{"dev."}, Resolutions: []string{"tracked"}},
+	} {
+		stream, err := f.api.Subscribe(ctx, as("core-token", req))
+		if err == nil {
+			stream.Receive()
+			err = stream.Err()
+		}
+		if k, _, _ := keyOf(err); connect.CodeOf(err) != connect.CodeInvalidArgument || k != "subscribe.resolution_invalid" {
+			t.Errorf("%v: %v (key %q), want subscribe.resolution_invalid", req.Resolutions, err, k)
+		}
+	}
+}
+
+// Tags out of log order: the stream holds an untagged event and everything
+// after it, so a later event tagged first is delivered after it, never instead.
+func TestTagOutOfOrder(t *testing.T) {
+	f := setup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, _ := f.systemStream(t, ctx, "bridge-core/ooo", []string{"hq"}, nil)
+	for _, id := range []string{"o1", "o2", "o3"} {
+		f.publish(t, "app-token", ev(id, "app/"+id))
+	}
+	if err := f.tag("atlas-token", hqTag(3, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	still(t, ch) // o3 is tagged, o1 is not: o1 holds the line
+	if err := f.tag("atlas-token", hqTag(1, "applied"), &bridgev1.EventTag{Seq: 2, System: "other", Resolution: "applied", RegistryVersion: "abc123/snap-1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"o1", "o3"} {
+		m := next(t, ch)
+		if m.GetEvent().GetId() != want {
+			t.Fatalf("got %s, want %s", m.GetEvent().GetId(), want)
+		}
+		f.ack(t, "bridge-core/ooo", m.GetEvent().GetSeq())
+	}
+}
+
+// An event never tagged holds the line for the grace window only: then the
+// stream moves past it, records it as a gap and ends Aborted, and the
+// reconnect gets the gap first, then the next tagged event.
+func TestTagGraceGap(t *testing.T) {
+	f := setup(t)
+	TagGrace = 500 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, done := f.systemStream(t, ctx, "bridge-core/grace", []string{"hq"}, nil)
+	f.publish(t, "app-token", ev("u1", "app/u1")) // never tagged
+	f.publish(t, "app-token", ev("u2", "app/u2"))
+	if err := f.tag("atlas-token", hqTag(2, "applied")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if k, _, _ := keyOf(err); connect.CodeOf(err) != connect.CodeAborted || k != "stream.gapped" {
+			t.Fatalf("stream ended %v (key %q), want Aborted stream.gapped", err, k)
+		}
+	case m := <-ch:
+		t.Fatalf("delivered %+v past an untagged event", m)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream waited past the grace window")
+	}
+	ch, _ = f.systemStream(t, ctx, "bridge-core/grace", []string{"hq"}, nil)
+	if g := next(t, ch).Gap; g == nil || g.FromSeq != 1 || g.ToSeq != 1 || g.Version < 1 {
+		t.Fatalf("first message gap %+v, want 1..1", g)
+	}
+	if m := next(t, ch); m.GetEvent().GetId() != "u2" {
+		t.Fatalf("got %+v, want u2", m)
 	}
 }

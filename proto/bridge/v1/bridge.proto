@@ -60,6 +60,11 @@ service BridgeService {
   // ConfirmGap clears the subscription's gap once the subscriber resynced. Only
   // a version a stream has sent is accepted.
   rpc ConfirmGap(ConfirmGapRequest) returns (ConfirmGapResponse);
+  // Tag attaches System tags to logged events. The bridge stores tags and
+  // never computes one: atlas resolves them as a client (conception §5, §16
+  // decision 6). Only a client allowed to tag may call it; at most 1000 tags
+  // per call, system and registry_version at most 256 bytes each.
+  rpc Tag(TagRequest) returns (TagResponse);
 }
 
 message PublishRequest {
@@ -79,15 +84,36 @@ message SubscribeRequest {
   // Subject globs: '*' matches any run of characters ('/' included), '?' one.
   // Empty matches every subject.
   repeated string subjects = 3;
+  // Systems, as tagged by Tag. Empty: no system filter. Otherwise only events
+  // with a tag naming one of them at resolution applied (or one opted into
+  // with resolutions), among the tags of the event's current registry version
+  // (the one whose first tag arrived last; an older version's tags no longer
+  // count). Delivery stays in log order and waits for the tag: when the next
+  // event is not tagged yet, the stream holds it (head of line) for the
+  // bridge's grace window (BRIDGE_TAG_GRACE, default 60s), then moves past it
+  // and every untagged event after it whose window has passed too, records
+  // them as a gap and ends Aborted (key stream.gapped): reconnect, and the gap
+  // comes first, as for retention. An event tagged after the stream moved past
+  // it is not delivered (Replay sees it).
+  repeated string systems = 4;
+  // Resolutions accepted besides applied, which alone may route a wake by
+  // default: any of tracked, placement, manager. ambiguous and unresolved
+  // never match. Only with systems.
+  repeated string resolutions = 5;
 }
 
 message SubscribeResponse {
   // Unset on the message that carries a gap.
   CloudEvent event = 1;
   // Sent first when retention deleted matching events this subscription
-  // never acked: resync from your own source of truth, then ConfirmGap with
-  // its version. Sent again on every reconnect until confirmed.
+  // never acked, or a System filter moved past untagged events: resync from
+  // your own source of truth, then ConfirmGap with its version. Sent again on
+  // every reconnect until confirmed.
   Gap gap = 2;
+  // The event's current tag set (the rows of its current registry version),
+  // on every subscription, filtered or not; empty when it is untagged. Check
+  // the resolution before acting on it.
+  repeated EventTag tags = 3;
 }
 
 // Gap is a range of log positions deleted before they were acked
@@ -137,7 +163,35 @@ message ReplayResponse {
   // in it may have been deleted; what follows is what is kept (parked events
   // included).
   Gap gap = 2;
+  // The event's current tag set, as on SubscribeResponse. Replay never sends
+  // an untagged event to a System-filtered subscription.
+  repeated EventTag tags = 3;
 }
+
+message TagRequest {
+  repeated EventTag tags = 1;
+}
+
+// EventTag is one System an event resolved to (conception §5). A tag for the
+// same seq, system and registry_version replaces the earlier one.
+message EventTag {
+  // The event's log position.
+  int64 seq = 1;
+  // An ArgoCD Application, or an atlas component where none exists. Empty
+  // exactly when resolution is unresolved.
+  string system = 2;
+  // The cascade rung that placed it: applied, tracked, placement, manager;
+  // or ambiguous, or unresolved. There is no namespace rung.
+  string resolution = 3;
+  // The registry version the resolver used (the infra-bootstrap sha and the
+  // ArgoCD resource-list snapshot id): a new version may tag the event again,
+  // and then only the version whose first tag arrived last counts for a
+  // System filter; re-sending an older version's tags does not make it
+  // current again.
+  string registry_version = 4;
+}
+
+message TagResponse {}
 
 // ErrorKey rides as a detail on every error a BridgeService handler returns
 // (mountain plan/15 §4): a stable key from the bridge's closed registry

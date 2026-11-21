@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -22,7 +23,7 @@ func open(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.db.Exec(context.Background(), `TRUNCATE events, subscriptions, dead_letters RESTART IDENTITY;
+	if _, err := s.db.Exec(context.Background(), `TRUNCATE events, event_tags, subscriptions, dead_letters RESTART IDENTITY;
 		UPDATE retention SET deleted_through = 0`); err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +117,102 @@ func TestKnown(t *testing.T) {
 	}
 	if !m["guid-1"] || m["guid-2"] || len(m) != 1 {
 		t.Fatalf("known = %v", m)
+	}
+}
+
+func TestRelistCursor(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, err := s.db.Exec(ctx, `TRUNCATE forge_relist`); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.RelistCursor(ctx, "a/b"); err != nil || !c.IsZero() {
+		t.Fatalf("never ran: %v %v", c, err)
+	}
+	at := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	for _, ts := range []time.Time{at.Add(-time.Hour), at} {
+		if err := s.SetRelistCursor(ctx, "a/b", ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, err := s.RelistCursor(ctx, "a/b"); err != nil || !c.Equal(at) {
+		t.Fatalf("cursor %v %v, want %v", c, err, at)
+	}
+}
+
+// Tag is all or none: a missing event refuses the batch, the schema refuses
+// a value, and the same (event, System, version) is replaced, not added.
+func TestTag(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, err := s.Insert(ctx, ev("a")); err != nil {
+		t.Fatal(err)
+	}
+	ok := Tag{Seq: 1, System: "hq", Resolution: "applied", RegistryVersion: "v1"}
+	if err := s.Tag(ctx, "atlas", []Tag{ok, {Seq: 99, System: "hq", Resolution: "applied", RegistryVersion: "v1"}}); !errors.Is(err, ErrNoEvent) {
+		t.Errorf("missing event: %v, want ErrNoEvent", err)
+	}
+	for _, bad := range []Tag{
+		{Seq: 1, System: "hq", Resolution: "namespace", RegistryVersion: "v1"}, // no namespace rung
+		{Seq: 1, System: "hq", Resolution: "unresolved", RegistryVersion: "v1"},
+		{Seq: 1, System: "", Resolution: "applied", RegistryVersion: "v1"},
+		{Seq: 1, System: "hq", Resolution: "applied", RegistryVersion: ""},
+	} {
+		if err := s.Tag(ctx, "atlas", []Tag{bad}); !Invalid(err) {
+			t.Errorf("%+v: %v, want a refusal", bad, err)
+		}
+	}
+	for _, res := range []string{"tracked", "applied"} {
+		ok.Resolution = res
+		if err := s.Tag(ctx, "atlas", []Tag{ok, {Seq: 1, Resolution: "unresolved", RegistryVersion: "v1"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	var res string
+	if err := s.db.QueryRow(ctx, `SELECT count(*), max(resolution) FILTER (WHERE system = 'hq') FROM event_tags`).Scan(&n, &res); err != nil || n != 2 || res != "applied" {
+		t.Errorf("%d tags, hq %s (%v); want 2, applied", n, res, err)
+	}
+}
+
+// A System filter reads only the event's current registry version, the one
+// whose first tag arrived last: hq@v1 applied, then v2 placing it elsewhere or
+// v3 ambiguous, no longer matches hq, and a late re-send of v1 does not bring
+// it back. Only applied matches unless the subscription opted in.
+func TestTaggedLatestVersion(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if _, err := s.Insert(ctx, ev("a")); err != nil {
+		t.Fatal(err)
+	}
+	tagged := func(system string, optIn ...string) (ok bool) {
+		t.Helper()
+		if err := s.db.QueryRow(ctx, `SELECT bridge_tagged(ARRAY[$1], $2, 1)`, system, nonNil(optIn)).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	for _, c := range []struct {
+		tags      []Tag
+		hq, other bool
+	}{
+		{[]Tag{{Seq: 1, System: "hq", Resolution: "applied", RegistryVersion: "v1"}}, true, false},
+		{[]Tag{{Seq: 1, System: "other", Resolution: "applied", RegistryVersion: "v2"}}, false, true},
+		{[]Tag{{Seq: 1, System: "hq", Resolution: "ambiguous", RegistryVersion: "v3"},
+			{Seq: 1, System: "other", Resolution: "ambiguous", RegistryVersion: "v3"}}, false, false},
+		// A late retry of v1, a new row of it included: v3 stays current.
+		{[]Tag{{Seq: 1, System: "hq", Resolution: "applied", RegistryVersion: "v1"},
+			{Seq: 1, System: "other", Resolution: "applied", RegistryVersion: "v1"}}, false, false},
+		{[]Tag{{Seq: 1, System: "hq", Resolution: "tracked", RegistryVersion: "v4"}}, false, false},
+	} {
+		if err := s.Tag(ctx, "atlas", c.tags); err != nil {
+			t.Fatal(err)
+		}
+		if hq, other := tagged("hq"), tagged("other"); hq != c.hq || other != c.other {
+			t.Errorf("after %+v: hq %v other %v, want %v %v", c.tags, hq, other, c.hq, c.other)
+		}
+	}
+	if !tagged("hq", "tracked") || tagged("hq", "manager") {
+		t.Error("tracked matches only a subscription that opted into it")
 	}
 }

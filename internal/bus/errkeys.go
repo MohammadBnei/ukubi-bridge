@@ -37,12 +37,16 @@ const (
 	keyActor         Key = "publish.actor_unknown"
 	keyRefused       Key = "publish.refused"
 	keyFilter        Key = "subscribe.filter_denied"
+	keyResolution    Key = "subscribe.resolution_invalid"
 	keyNotInFlight   Key = "delivery.not_in_flight"
 	keyGapVersion    Key = "gap.version_invalid"
 	keyGapUnsent     Key = "gap.version_unsent"
 	keyGapStale      Key = "gap.version_stale"
 	keyNoSub         Key = "replay.no_subscription"
 	keyFilterRevoked Key = "replay.filter_revoked"
+	keyTagDenied     Key = "tag.denied"
+	keyTagInvalid    Key = "tag.invalid"
+	keyTagNoEvent    Key = "tag.no_event"
 	keyInternal      Key = "server.internal"
 )
 
@@ -66,7 +70,9 @@ func tokenKey(err error) Key {
 var connectKeys = connectkeys.New(&bridgev1.ErrorKey{}, &errorsv1.ErrorKey{})
 
 // keyed is Connect's error for code with err's words, keyed: the bridge's own words.
-func keyed(code connect.Code, key Key, err error) *connect.Error { return connectKeys.Connect(code, key, err) }
+func keyed(code connect.Code, key Key, err error) *connect.Error {
+	return connectKeys.Connect(code, key, err)
+}
 
 // sourced is keyed with the source whose words err holds.
 func sourced(code connect.Code, key Key, source string, err error) *connect.Error {

@@ -46,6 +46,8 @@ const (
 	// BridgeServiceConfirmGapProcedure is the fully-qualified name of the BridgeService's ConfirmGap
 	// RPC.
 	BridgeServiceConfirmGapProcedure = "/bridge.v1.BridgeService/ConfirmGap"
+	// BridgeServiceTagProcedure is the fully-qualified name of the BridgeService's Tag RPC.
+	BridgeServiceTagProcedure = "/bridge.v1.BridgeService/Tag"
 )
 
 // BridgeServiceClient is a client for the bridge.v1.BridgeService service.
@@ -62,6 +64,11 @@ type BridgeServiceClient interface {
 	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
 	// a version a stream has sent is accepted.
 	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
+	// Tag attaches System tags to logged events. The bridge stores tags and
+	// never computes one: atlas resolves them as a client (conception §5, §16
+	// decision 6). Only a client allowed to tag may call it; at most 1000 tags
+	// per call, system and registry_version at most 256 bytes each.
+	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
 }
 
 // NewBridgeServiceClient constructs a client for the bridge.v1.BridgeService service. By default,
@@ -111,6 +118,12 @@ func NewBridgeServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(bridgeServiceMethods.ByName("ConfirmGap")),
 			connect.WithClientOptions(opts...),
 		),
+		tag: connect.NewClient[v1.TagRequest, v1.TagResponse](
+			httpClient,
+			baseURL+BridgeServiceTagProcedure,
+			connect.WithSchema(bridgeServiceMethods.ByName("Tag")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -122,6 +135,7 @@ type bridgeServiceClient struct {
 	nack       *connect.Client[v1.NackRequest, v1.NackResponse]
 	replay     *connect.Client[v1.ReplayRequest, v1.ReplayResponse]
 	confirmGap *connect.Client[v1.ConfirmGapRequest, v1.ConfirmGapResponse]
+	tag        *connect.Client[v1.TagRequest, v1.TagResponse]
 }
 
 // Publish calls bridge.v1.BridgeService.Publish.
@@ -154,6 +168,11 @@ func (c *bridgeServiceClient) ConfirmGap(ctx context.Context, req *connect.Reque
 	return c.confirmGap.CallUnary(ctx, req)
 }
 
+// Tag calls bridge.v1.BridgeService.Tag.
+func (c *bridgeServiceClient) Tag(ctx context.Context, req *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error) {
+	return c.tag.CallUnary(ctx, req)
+}
+
 // BridgeServiceHandler is an implementation of the bridge.v1.BridgeService service.
 type BridgeServiceHandler interface {
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
@@ -168,6 +187,11 @@ type BridgeServiceHandler interface {
 	// ConfirmGap clears the subscription's gap once the subscriber resynced. Only
 	// a version a stream has sent is accepted.
 	ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error)
+	// Tag attaches System tags to logged events. The bridge stores tags and
+	// never computes one: atlas resolves them as a client (conception §5, §16
+	// decision 6). Only a client allowed to tag may call it; at most 1000 tags
+	// per call, system and registry_version at most 256 bytes each.
+	Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error)
 }
 
 // NewBridgeServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -213,6 +237,12 @@ func NewBridgeServiceHandler(svc BridgeServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(bridgeServiceMethods.ByName("ConfirmGap")),
 		connect.WithHandlerOptions(opts...),
 	)
+	bridgeServiceTagHandler := connect.NewUnaryHandler(
+		BridgeServiceTagProcedure,
+		svc.Tag,
+		connect.WithSchema(bridgeServiceMethods.ByName("Tag")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/bridge.v1.BridgeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BridgeServicePublishProcedure:
@@ -227,6 +257,8 @@ func NewBridgeServiceHandler(svc BridgeServiceHandler, opts ...connect.HandlerOp
 			bridgeServiceReplayHandler.ServeHTTP(w, r)
 		case BridgeServiceConfirmGapProcedure:
 			bridgeServiceConfirmGapHandler.ServeHTTP(w, r)
+		case BridgeServiceTagProcedure:
+			bridgeServiceTagHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -258,4 +290,8 @@ func (UnimplementedBridgeServiceHandler) Replay(context.Context, *connect.Reques
 
 func (UnimplementedBridgeServiceHandler) ConfirmGap(context.Context, *connect.Request[v1.ConfirmGapRequest]) (*connect.Response[v1.ConfirmGapResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bridge.v1.BridgeService.ConfirmGap is not implemented"))
+}
+
+func (UnimplementedBridgeServiceHandler) Tag(context.Context, *connect.Request[v1.TagRequest]) (*connect.Response[v1.TagResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bridge.v1.BridgeService.Tag is not implemented"))
 }

@@ -29,6 +29,18 @@ var (
 	MaxAttempts = 5                // Nacks before an event is dead-lettered
 	RetryBase   = time.Second      // backoff after Nack n is RetryBase << (n-1)
 	PollEvery   = 30 * time.Second // fallback when a NOTIFY is missed
+	// TagGrace is how long a System-filtered stream holds an untagged event
+	// for its tag before it gaps it (BRIDGE_TAG_GRACE).
+	TagGrace = 60 * time.Second
+)
+
+// optIn is the resolutions a System filter may accept besides applied.
+var optIn = []string{"tracked", "placement", "manager"}
+
+// Tag limits: a batch fans out to every live stream's Match.
+const (
+	maxTags     = 1000
+	maxTagField = 256 // bytes, system and registry_version
 )
 
 // Client is one BRIDGE_API_CLIENTS entry, keyed by its authentik username
@@ -44,6 +56,8 @@ type Client struct {
 	// (ADR-0066 §2). privileged never widens it.
 	Subscribe  []Rule `json:"subscribe"`
 	Privileged bool   `json:"privileged"` // may set actor, actor_trusted, hops, causation_id (never thread_owned, a GitHub fact)
+	// Tag: may attach System tags (the Tag RPC). It reads nothing more for it.
+	Tag bool `json:"tag"`
 }
 
 // Rule pairs type prefixes with subject prefixes; subject "" allows any.
@@ -55,7 +69,7 @@ type Rule struct {
 // PrivilegedClient is the only client that may be privileged: agent-fleet core.
 const PrivilegedClient = "bridge-core"
 
-// ParseClients reads BRIDGE_API_CLIENTS: {"<username>": {kind, publish_types, publish_subjects, subscribe, privileged}}.
+// ParseClients reads BRIDGE_API_CLIENTS: {"<username>": {kind, publish_types, publish_subjects, subscribe, privileged, tag}}.
 func ParseClients(js string) (map[string]Client, error) {
 	clients := map[string]Client{}
 	if js == "" {
@@ -212,6 +226,7 @@ func (s *Server) Handler(ics ...connect.Interceptor) (string, http.Handler) {
 var (
 	errGapped   = errors.New("retention deleted events this subscription had not acked: reconnect to get the gap, then resync")
 	errReplaced = errors.New("replaced by a newer stream on this subscription")
+	errUntagged = errors.New("untagged events outlived the tag grace window: reconnect to get the gap, then resync")
 )
 
 // errExpired ends a stream at its token's exp, so the client reconnects with
@@ -351,6 +366,15 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	if !c.mayRead(req.Msg.GetTypes(), req.Msg.GetSubjects()) {
 		return keyed(connect.CodePermissionDenied, keyFilter, fmt.Errorf("%s may not read that filter", c.Name))
 	}
+	res := req.Msg.GetResolutions()
+	if len(res) > 0 && len(req.Msg.GetSystems()) == 0 {
+		return keyed(connect.CodeInvalidArgument, keyResolution, errors.New("resolutions need systems"))
+	}
+	for _, r := range res {
+		if !slices.Contains(optIn, r) {
+			return keyed(connect.CodeInvalidArgument, keyResolution, fmt.Errorf("resolution %q: want one of %v", r, optIn))
+		}
+	}
 	ctx, cancel, err := untilExpiry(ctx, exp)
 	if err != nil {
 		return err
@@ -361,7 +385,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 	// registration below would miss this stream: after registering, the gap
 	// version is read again and a change ends the stream, so it reconnects to
 	// the new gap.
-	cursor, gap, readVer, err := s.st.Subscribe(ctx, name, req.Msg.GetTypes(), req.Msg.GetSubjects())
+	// A System filter only narrows what the types and subjects admit.
+	cursor, gap, readVer, err := s.st.Subscribe(ctx, name, store.Filter{Types: req.Msg.GetTypes(), Subjects: req.Msg.GetSubjects(),
+		Systems: req.Msg.GetSystems(), Resolutions: res})
 	if err != nil {
 		return unavailable(ctx, err)
 	}
@@ -422,6 +448,26 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 			continue
 		}
 		d := ds[0]
+		if d.Untagged {
+			// Head of line: no later event goes before this one's tag.
+			if wait := time.Until(d.IngestedAt.Add(TagGrace)); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return ended(ctx)
+				case <-wake: // a Tag nudges too
+				case <-time.After(min(wait, PollEvery)):
+				}
+				continue
+			}
+			gapped, err := s.st.GapUntagged(ctx, name, d.Seq, TagGrace)
+			if err != nil {
+				return unavailable(ctx, err)
+			}
+			if gapped {
+				return keyed(connect.CodeAborted, keyGapped, errUntagged) // reconnect for the gap, as after retention
+			}
+			continue // tagged meanwhile
+		}
 		if d.Parked {
 			if err := s.st.DeadLetter(ctx, name, d.Event, "subject parked"); err != nil {
 				return unavailable(ctx, err)
@@ -432,7 +478,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[bridgev1.Su
 		s.mu.Lock()
 		me.inflight = d.Event
 		s.mu.Unlock()
-		if err := out.Send(&bridgev1.SubscribeResponse{Event: toProto(d.Event, false)}); err != nil {
+		if err := out.Send(&bridgev1.SubscribeResponse{Event: toProto(d.Event, false), Tags: tagsProto(d.Tags)}); err != nil {
 			return err
 		}
 		select {
@@ -634,13 +680,56 @@ func (s *Server) Replay(ctx context.Context, req *connect.Request[bridgev1.Repla
 			if d.Seq > head {
 				return nil
 			}
-			if err := out.Send(&bridgev1.ReplayResponse{Event: toProto(d.Event, true)}); err != nil {
-				return err
+			if !d.Untagged { // not a match (yet): Replay never waits
+				if err := out.Send(&bridgev1.ReplayResponse{Event: toProto(d.Event, true), Tags: tagsProto(d.Tags)}); err != nil {
+					return err
+				}
 			}
 			after = d.Seq
 		}
 	}
 	return nil
+}
+
+// Tag stores the tags as the client's, all or none. A seq that holds no event
+// (retention deleted it) is NotFound, and nothing is stored.
+// ponytail: a tagger may tag any seq, read or not; check its subscribe rules
+// if a second tagger appears.
+func (s *Server) Tag(ctx context.Context, req *connect.Request[bridgev1.TagRequest]) (*connect.Response[bridgev1.TagResponse], error) {
+	c, _, err := s.auth(req.Header())
+	if err != nil {
+		return nil, err
+	}
+	if !c.Tag {
+		return nil, keyed(connect.CodePermissionDenied, keyTagDenied, fmt.Errorf("%s may not tag", c.Name))
+	}
+	if n := len(req.Msg.GetTags()); n == 0 || n > maxTags {
+		return nil, keyed(connect.CodeInvalidArgument, keyTagInvalid, fmt.Errorf("%d tags: want 1 to %d", n, maxTags))
+	}
+	tags := make([]store.Tag, 0, len(req.Msg.GetTags()))
+	for _, t := range req.Msg.GetTags() {
+		if len(t.GetSystem()) > maxTagField || len(t.GetRegistryVersion()) > maxTagField {
+			return nil, keyed(connect.CodeInvalidArgument, keyTagInvalid, fmt.Errorf("seq %d: system or registry_version over %d bytes", t.GetSeq(), maxTagField))
+		}
+		tags = append(tags, store.Tag{Seq: t.GetSeq(), System: t.GetSystem(), Resolution: t.GetResolution(), RegistryVersion: t.GetRegistryVersion()})
+	}
+	switch err := s.st.Tag(ctx, c.Name, tags); {
+	case errors.Is(err, store.ErrNoEvent):
+		return nil, sourced(connect.CodeNotFound, keyTagNoEvent, sourceStore, err)
+	case store.Invalid(err):
+		return nil, sourced(connect.CodeInvalidArgument, keyTagInvalid, sourceStore, err) // the schema's checks: retrying cannot help
+	case err != nil:
+		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
+	}
+	return connect.NewResponse(&bridgev1.TagResponse{}), nil
+}
+
+func tagsProto(tags []store.Tag) []*bridgev1.EventTag {
+	out := make([]*bridgev1.EventTag, 0, len(tags))
+	for _, t := range tags {
+		out = append(out, &bridgev1.EventTag{Seq: t.Seq, System: t.System, Resolution: t.Resolution, RegistryVersion: t.RegistryVersion})
+	}
+	return out
 }
 
 func toProto(e event.Event, replayed bool) *bridgev1.CloudEvent {

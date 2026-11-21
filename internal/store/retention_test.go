@@ -52,7 +52,7 @@ func TestPrune(t *testing.T) {
 	for _, sub := range []struct{ name, types, subjects string }{
 		{"quiet", "dev.q.", ""}, {"lagging", "dev.a.", ""}, {"parked", "dev.a.", ""}, {"ahead", "dev.a.", ""},
 	} {
-		if _, _, _, err := s.Subscribe(ctx, sub.name, []string{sub.types}, nil); err != nil {
+		if _, _, _, err := s.Subscribe(ctx, sub.name, Filter{Types: []string{sub.types}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +132,7 @@ func TestPrune(t *testing.T) {
 
 	// Subscribe reports the gap with its version; an Ack never moves the
 	// cursor back; only the current version's confirmation clears it.
-	_, gap, _, err := s.Subscribe(ctx, "lagging", []string{"dev.a."}, nil)
+	_, gap, _, err := s.Subscribe(ctx, "lagging", Filter{Types: []string{"dev.a."}})
 	if err != nil || gap == nil || gap.From != 2 || gap.To != 6 || gap.Version != 1 {
 		t.Fatalf("subscribe gap %+v %v", gap, err)
 	}
@@ -179,7 +179,7 @@ func TestPruneWidensGap(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
 	cutoff := time.Now().Add(-30 * 24 * time.Hour)
-	if _, _, _, err := s.Subscribe(ctx, "w", []string{"dev."}, nil); err != nil {
+	if _, _, _, err := s.Subscribe(ctx, "w", Filter{Types: []string{"dev."}}); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 4 {
@@ -205,7 +205,7 @@ func TestPruneWidensGap(t *testing.T) {
 func TestStaleDeadLetters(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
-	_, _, _, _ = s.Subscribe(ctx, "d", []string{"dev."}, nil)
+	_, _, _, _ = s.Subscribe(ctx, "d", Filter{Types: []string{"dev."}})
 	for i, subj := range []string{"x/1", "x/1", "x/2"} {
 		_, _ = s.Insert(ctx, evOn(fmt.Sprint("d", i), "dev.x", subj))
 		if err := s.DeadLetter(ctx, "d", event.Event{Seq: int64(i + 1), Subject: subj}, "boom"); err != nil {
@@ -226,7 +226,7 @@ func TestStaleDeadLetters(t *testing.T) {
 func TestDeadLetterAfterPrune(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
-	_, _, _, _ = s.Subscribe(ctx, "n", []string{"dev."}, nil)
+	_, _, _, _ = s.Subscribe(ctx, "n", Filter{Types: []string{"dev."}})
 	_, _ = s.Insert(ctx, evOn("gone", "dev.x", "x/1"))
 	age(t, s, 1)
 	if _, err := s.Prune(ctx, time.Now().Add(-30*24*time.Hour)); err != nil {
@@ -241,7 +241,61 @@ func TestDeadLetterAfterPrune(t *testing.T) {
 		t.Fatal("a dead letter was recorded for a deleted event, parking its subject")
 	}
 	// A new subscription starts at or past the watermark, never below it.
-	if c, _, _, err := s.Subscribe(ctx, "late", []string{"dev."}, nil); err != nil || c < 1 {
+	if c, _, _, err := s.Subscribe(ctx, "late", Filter{Types: []string{"dev."}}); err != nil || c < 1 {
 		t.Fatalf("new subscription cursor %d %v", c, err)
+	}
+}
+
+// A System filter is part of what retention counts: an event tagged for
+// another System, or at a resolution the subscription did not opt into, is not
+// its loss; one tagged for it is, and so is an untagged one (it may have been
+// its: never a silent skip). Tags go with their event.
+func TestPruneSystems(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	for name, sys := range map[string]string{"sys-other": "other", "sys-hq": "hq"} {
+		if _, _, _, err := s.Subscribe(ctx, name, Filter{Types: []string{"dev."}, Systems: []string{sys}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	for i, tg := range []Tag{{Seq: 1, System: "hq", Resolution: "applied"}, {Seq: 2, System: "other", Resolution: "tracked"}} {
+		if _, err := s.Insert(ctx, evOn(fmt.Sprint("t", i), "dev.a.x", "a/1")); err != nil {
+			t.Fatal(err)
+		}
+		tg.RegistryVersion = "v1"
+		if err := s.Tag(ctx, "atlas", []Tag{tg}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Neither acked anything; only sys-hq ever matched one of them.
+	age(t, s, 2)
+	p, err := s.Prune(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(p.Gapped, []string{"sys-hq"}) {
+		t.Errorf("gapped %v, want [sys-hq]", p.Gapped)
+	}
+	if _, from, to := cursorGap(t, s, "sys-hq"); from == nil || *from != 1 || *to != 2 {
+		t.Errorf("sys-hq gap %v-%v", from, to)
+	}
+	var n int
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM event_tags`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("%d tags left (%v)", n, err)
+	}
+
+	if _, err := s.Insert(ctx, evOn("untagged", "dev.a.x", "a/2")); err != nil {
+		t.Fatal(err)
+	}
+	age(t, s, 3)
+	if p, err = s.Prune(ctx, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Sort(p.Gapped); !slices.Equal(p.Gapped, []string{"sys-hq", "sys-other"}) {
+		t.Errorf("untagged: gapped %v, want both", p.Gapped)
+	}
+	if _, from, to := cursorGap(t, s, "sys-other"); from == nil || *from != 3 || *to != 3 {
+		t.Errorf("sys-other gap %v-%v, want 3-3", from, to)
 	}
 }

@@ -27,7 +27,7 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   three review types as `pull_request_review.approved|rejected|comment`, and
   `action_run.success|failure|recover`; anything else is a 204. Type
   `dev.bnei.forge.<event>.<action>`, source `git.bnei.dev/<owner>/<repo>`,
-  `ce_id` = `X-Forgejo-Delivery`, subject `forge/<owner>/<repo>/pr|issue/<n>`,
+  subject `forge/<owner>/<repo>/pr|issue/<n>`,
   or `forge/<owner>/<repo>/run/<n>` for a run (its number in the repo, as in
   its URL). The trust facts follow the GitHub rules, on their own logins
   (`BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS`: a name
@@ -35,10 +35,27 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   actor and owner are its trigger user, and a fork PR's run is never owned.
   Forgejo puts the PR in a comment's payload, so a comment on a fork PR reads
   not owned here, and a PR comment without that PR reads not owned too.
-  Forgejo neither retries nor lists its deliveries: a 503 is recovered only by
-  a manual redelivery from the webhook's settings page. A redelivery gets a
-  new `X-Forgejo-Delivery`, so a new `ce_id`: redeliver only a delivery marked
-  failed, or the event is stored twice. Not reachable yet: Forgejo runs outside
+  `ce_id` is the fact's own key wherever the relist loop below can see the
+  fact, so its delivery and its relisted copy are one event (`forgejo.factID`):
+  `pr/<n>/opened`, `pr/<n>/closed/<closed_at unix>` (a merge too),
+  `issue/<n>/opened`, `comment/<comment id>`, and for an approval or a
+  change request
+  `pr/<n>/review/<approved|rejected>/<reviewer>/<head sha>/<sha256(text)[:8] hex>`
+  (a review delivery has no review id: one submitted on a head that moved
+  before it landed is stored twice, and the same verdict with the same text
+  by one reviewer on one head is stored once). A COMMENT review is **not**
+  content-keyed: Forgejo submits each single inline code comment as its own
+  empty COMMENT review, which a content key would drop as the previous one's
+  duplicate. Its delivery keeps `X-Forgejo-Delivery`; its relisted copy is
+  `pr/<n>/review/comment/<review id>`, so the relist loop stores a COMMENT
+  review the webhook already stored a second time (the recovery path may
+  duplicate; the live one never drops). Every other event keeps
+  `X-Forgejo-Delivery` as its `ce_id`: synchronized, reopened, label_updated
+  and runs, none of which the loop recovers. A closed delivery without
+  `pull_request.closed_at` keeps its delivery id too, logged at WARN: its
+  relisted copy would be stored again. A manual redelivery of one of
+  those gets a new `X-Forgejo-Delivery`, so redeliver only a delivery marked
+  failed, or it is stored twice. Not reachable yet: Forgejo runs outside
   the cluster and the IngressRoute carries only `/webhook/github` (see Not yet).
 - GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
   to the lookback window and redelivers, oldest first, each one not in
@@ -48,6 +65,29 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   `BRIDGE_RECONCILE_LOOKBACK` window (default 6h), is given up on and logged.
   An outage (5xx, timeout) is retried until then, so a longer outage needs a
   manual redelivery from the App's log, which GitHub keeps for 3 days. A 403/429 ends the run; the next tick tries again.
+- Forgejo relist: Forgejo neither retries nor lists its deliveries, so every
+  10 minutes the bridge lists, per repo in `BRIDGE_FORGEJO_RELIST_REPOS` (off
+  when empty), the PRs (newest update first), issues and comments updated
+  since the repo's cursor, and each listed PR's reviews, and inserts, oldest
+  first, the facts above that happened since: an opened PR or issue, a closed
+  or merged PR, a comment, a submitted review. The `(source, ce_id)` dedup
+  drops what the webhook already stored. Its data is the webhook's payload
+  shape rebuilt from the API objects as they are now, with `"relisted": true`
+  and Forgejo's own `repository.full_name` (whatever case the repo is listed
+  in); a comment's `issue` is the listed issue, or for a PR's comment the PR
+  object (number, user, title, body, html_url, state), not the webhook's
+  issue view of it. A relisted fact is **never `actor_trusted`**: its text
+  may have been edited since by anyone with write access (a fleet agent too),
+  so the author's trust cannot vouch for it; `thread_owned` keeps the
+  thread author's rules. An unmerged close names no sender (actor empty).
+  Pages after the first go to `BRIDGE_FORGEJO_URL`'s host, whatever host
+  Forgejo's `Link` header names (its ROOT_URL). The cursor
+  (`forge_relist`, where the repo's last good run started) survives restarts;
+  each window starts 5 minutes before it, and never further back than
+  `BRIDGE_RETENTION`; a repo's first run looks back 6 hours. A repo that fails
+  keeps its cursor and is retried on the next tick. So does a run whose PR
+  list shifted while it was paged (a page repeats a PR: one updated mid-run
+  jumped to page 1, and the PR it pushed past may have been skipped).
 - `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
   one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
   `repeat_interval` resend of the same firing coalesces while its resolution
@@ -73,9 +113,28 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     `owner`, and `hops` one above what it sent (`causation_id` kept). Only a
     `privileged` client (agent-fleet core) sets actor, `actor_trusted`, owner and hops; nobody publishes `thread_owned`, a GitHub fact.
     Nobody sets `replayed`.
-  - `Subscribe(name, types, subjects)` — `name` is the client's own name or
+  - `Subscribe(name, types, subjects, systems, resolutions)` — `name` is the client's own name or
     `<name>/<suffix>`. The whole filter must fit one of the client's
-    `subscribe` rules, and `types` cannot be empty. The stream ends
+    `subscribe` rules, and `types` cannot be empty. `systems` (optional) only
+    narrows it: an event matches once a tag of its current registry version
+    (the version whose first tag arrived last: a new version supersedes the
+    older one's rows, which stay stored) names one of them at `applied`.
+    Only `applied` routes a wake by default; `resolutions` opts into
+    `tracked`, `placement` or `manager` as well (anything else, or
+    `resolutions` without `systems`, is `InvalidArgument`
+    `subscribe.resolution_invalid`); `ambiguous` and `unresolved` never
+    match. Every event message carries the event's current tag set (`tags`:
+    system, resolution, registry version; empty when untagged), filtered
+    subscription or not, so check the resolution before acting. A System
+    filter never skips an event in silence: when the next event in log order
+    (by types and subjects) has no tag yet, the stream holds it, head of line,
+    for `BRIDGE_TAG_GRACE` (default 60 s) from its ingestion; then it moves
+    past it and every later untagged event whose window has passed too,
+    records them as a gap and ends `Aborted` (`stream.gapped`): the reconnect
+    gets the gap first, as after retention, and `ConfirmGap` clears it. A tag
+    that lands after the stream moved past its event (a late re-tag, or one
+    in the gap) is not delivered, though `Replay` sees it. Retention counts a
+    gap with the same filter, untagged events included. The stream ends
     `Unauthenticated` at the token's expiry: reconnect with a fresh token (the
     cursor is kept; an event in flight is redelivered, as after any
     disconnect). A token with less than 5 s left cannot open a stream, so
@@ -91,6 +150,24 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     never processed out of order.
   - `ConfirmGap(subscription, version)` — clears a gap once resynced (see
     Retention).
+  - `Tag(tags)` — attaches System tags to logged events, only for a client
+    with `tag` (atlas, which computes them: the bridge stores tags and never
+    resolves one, so it never imports mountain). Each tag is `seq`, `system`
+    (empty exactly when unresolved), `resolution` (`applied`, `tracked`,
+    `placement`, `manager`, `ambiguous` or `unresolved`; there is no namespace
+    rung) and `registry_version` (required), stored in `event_tags` with the
+    client's name as `tagger` and `tagged_at`, never in the event. All or
+    none: a seq that holds no event (retention deleted it) is `NotFound`, a
+    value the schema refuses, an empty batch, more than 1000 tags or a
+    `system` or `registry_version` over 256 bytes is `InvalidArgument`. A tag
+    for the same seq, System and registry version replaces the earlier one's
+    resolution and keeps its place; a new registry version adds rows and
+    becomes the event's current tag set. Which version is current is decided
+    by arrival (`event_tags.arrival`, the order rows were first inserted), so
+    a late retry of an older version never makes it current again; two
+    concurrent calls with different versions are ordered by insert, not
+    commit. Retention deletes an event's tags with it. A tag wakes the
+    streams, so a System filter sees its event at once.
   - `Replay(subscription, from_seq)` — streams the subscription's matching
     events from `from_seq` to the current head with `replayed=true`, after
     checking the stored filter still fits the client's rules (`NotFound` for a
@@ -99,7 +176,9 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
     no cursor change, nothing written. Subscribers must be idempotent on
     `(source, id)` (or `seq`, which is the same event's log position) — never
     on `id` alone: two clients can both publish id `1`. From at or below the
-    retention watermark, the first message is a `gap` (see Retention).
+    retention watermark, the first message is a `gap` (see Retention). Each
+    event carries its current `tags`, as on `Subscribe`; a System-filtered
+    subscription's replay never waits, and leaves out events still untagged.
 
 ### Retention
 
@@ -146,9 +225,14 @@ Not yet:
 - Forgejo: a route from Forgejo (CT 305, outside the cluster) to
   `/webhook/forgejo`, such as an internal-only IngressRoute locked to the
   Forgejo host; the webhook's registration and Forgejo's `ALLOWED_HOST_LIST`;
-  and a reconcile loop. Forgejo has no deliveries API, so that loop would
-  relist PRs and issues, and needs `ce_id`s derived from the content: a
-  relisted PR has no delivery UUID to dedup on.
+  the relist loop's token Secret (`ukubi-bridge-forgejo-token`, key `token`:
+  the chart mounts it, optional, at `/var/run/secrets/forgejo`, and its repo
+  list is empty) rendered by infra-bootstrap; relisting pushes
+  (synchronized), reopens, label changes and runs.
+- System tags: the authentik `bridge-atlas` service account (kind machine,
+  the only `tag` client in the chart's table) and atlas itself; until then no
+  event is tagged and a System-filtered subscription gaps every event it
+  sees after the grace window.
 - A live API client. No client can call until `BRIDGE_OIDC_CERT` is set and
   the authentik `ukubi-bridge-api` provider exists (infra-bootstrap
   ADR-0066). agent-fleet's consumer is its `core/internal/dispatch` (its
@@ -208,7 +292,7 @@ outermost. The registry is closed, in `internal/bus/errkeys.go`:
 | `auth.not_a_client` | a valid token for an account `BRIDGE_API_CLIENTS` does not list |
 | `auth.subscription_not_owned` | the subscription is not the client's name or under it |
 | `stream.token_near_expiry` | too little token left to open a stream |
-| `stream.gapped` | retention deleted events the subscription had not acked: reconnect for the gap, resync, ConfirmGap |
+| `stream.gapped` | retention deleted events the subscription had not acked, or its System filter moved past untagged events after the grace window: reconnect for the gap, resync, ConfirmGap |
 | `store.unavailable` | the store failed (retry); source `store` |
 | `publish.fields_required` | id, type and subject are required |
 | `publish.type_denied` | the client may not publish that type |
@@ -222,8 +306,12 @@ outermost. The registry is closed, in `internal/bus/errkeys.go`:
 | `gap.version_invalid` | ConfirmGap's version is not positive |
 | `gap.version_unsent` | ConfirmGap of a version no stream sent |
 | `gap.version_stale` | ConfirmGap of a version since widened: reconnect for the new one |
+| `subscribe.resolution_invalid` | `resolutions` names something other than tracked, placement or manager, or comes without `systems` |
 | `replay.no_subscription` | Replay of a subscription that does not exist |
 | `replay.filter_revoked` | Replay of a subscription whose filter the client may no longer read |
+| `tag.denied` | the client may not tag |
+| `tag.invalid` | no tags or over 1000, a system or registry_version over 256 bytes, or the store refused a tag's values (source `store`) |
+| `tag.no_event` | a tag's seq holds no event: nothing was stored; source `store` |
 | `server.internal` | an error a handler returned without its own key (a failed send): its code and words kept |
 
 The webhook endpoints answer GitHub, Alertmanager and Grafana in plain text, by status only, as before.
@@ -242,9 +330,13 @@ loop for a private key that does not parse).
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
 | `BRIDGE_FORGEJO_WEBHOOK_SECRET` | The Forgejo webhook's secret. Unset: `/webhook/forgejo` is off (404), logged at WARN. |
 | `BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS` | `BRIDGE_TRUSTED_LOGINS` and `BRIDGE_AGENT_LOGINS` for Forgejo logins, read by `/webhook/forgejo` only. |
+| `BRIDGE_FORGEJO_RELIST_REPOS` | Comma-separated `owner/repo` the Forgejo relist loop watches. Unset or empty: the loop is off. An entry that is not `owner/repo` is skipped with a warning. |
+| `BRIDGE_FORGEJO_TOKEN_FILE` | Path of a mounted file holding a Forgejo token with `read:repository` and `read:issue` only, read on every run (a rotation needs no restart). Without it the relist loop is off, with a warning. |
+| `BRIDGE_TAG_GRACE` | How long a System-filtered stream holds an untagged event for its tag before it gaps it, a Go duration above 0, default `60s`. |
+| `BRIDGE_FORGEJO_URL` | Forgejo's base URL for the relist loop, default `https://git.bnei.dev`; every page is fetched from this host. Not `https://`: a warning (the token goes in clear). |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |
-| `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |
+| `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. `tag` lets a client call `Tag`. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |
 | `BRIDGE_OIDC_ISSUER`, `BRIDGE_OIDC_CLIENT_ID` | The authentik provider's issuer URL and client id; a token must carry both (`iss`, `aud`, `azp`). |
 | `BRIDGE_OIDC_CERT` | The pinned signing certificate(s), PEM: the only trust anchor. Empty: every API call is refused, the webhooks still work. |
 | `BRIDGE_OIDC_JWKS_URL` | Optional. The provider's JWKS, fetched hourly and compared with the pinned certificate; a mismatch is logged, never trusted. |
@@ -271,6 +363,8 @@ tests run in their own database (`bridge_bus_test`, recreated each run) with
 the poll fallback set to an hour, so they also prove the NOTIFY path.
 `TestNackDeadLetterParksSubject` fails if parking is removed: the second event
 on the poisoned subject is delivered instead of parked.
+`TestTagOutOfOrder` and `TestTagGraceGap` fail if a System filter skips an
+untagged event instead of holding it, then gapping it.
 
 ## Regenerating the API code
 

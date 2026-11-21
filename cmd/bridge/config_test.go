@@ -41,7 +41,7 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{WebhookSecret: "s", Trusted: map[string]bool{}, Agents: map[string]bool{},
-		ForgejoTrusted: map[string]bool{}, ForgejoAgents: map[string]bool{}, Retention: 720 * time.Hour, Port: "8080"}
+		ForgejoTrusted: map[string]bool{}, ForgejoAgents: map[string]bool{}, Retention: 720 * time.Hour, TagGrace: time.Minute, Port: "8080"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)
 	}
@@ -55,7 +55,7 @@ func TestConfigEnv(t *testing.T) {
 		"BRIDGE_OIDC_ISSUER": "i", "BRIDGE_OIDC_CLIENT_ID": "c", "BRIDGE_OIDC_CERT": "pem", "BRIDGE_OIDC_JWKS_URL": "j",
 		"BRIDGE_DATABASE_URL": "db", "BRIDGE_TRUSTED_LOGINS": " a, b,,", "BRIDGE_AGENT_LOGINS": "c",
 		"BRIDGE_ALERT_TOKEN": "t", "BRIDGE_RETENTION": "48h", "PORT": "9", "BRIDGE_GITHUB_APP_ID": "7",
-		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h",
+		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h", "BRIDGE_TAG_GRACE": "90s",
 		"BRIDGE_FORGEJO_WEBHOOK_SECRET": "f", "BRIDGE_FORGEJO_TRUSTED_LOGINS": "d", "BRIDGE_FORGEJO_AGENT_LOGINS": "e",
 	}))
 	if err != nil {
@@ -68,7 +68,7 @@ func TestConfigEnv(t *testing.T) {
 	want := Config{WebhookSecret: "s", LegacyClients: true, APIClients: "{}", OIDC: OIDCConfig{"i", "c", "pem", "j"},
 		DatabaseURL: "db", Trusted: map[string]bool{"a": true, "b": true}, Agents: map[string]bool{"c": true},
 		ForgejoSecret: "f", ForgejoTrusted: map[string]bool{"d": true}, ForgejoAgents: map[string]bool{"e": true},
-		AlertToken: "t", Retention: 48 * time.Hour, Port: "9"}
+		AlertToken: "t", Retention: 48 * time.Hour, TagGrace: 90 * time.Second, Port: "9"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)
 	}
@@ -132,6 +132,8 @@ func TestConfigWarnings(t *testing.T) {
 			func(c Config) bool { return c.Retention == 720*time.Hour && c.App != nil }},
 		{"short retention", map[string]string{"BRIDGE_RETENTION": "23h59m"}, []string{retention + " [value 23h59m default 720h0m0s]"},
 			func(c Config) bool { return c.Retention == 720*time.Hour }},
+		{"tag grace", map[string]string{"BRIDGE_TAG_GRACE": "0s"}, []string{"BRIDGE_TAG_GRACE must be a Go duration above 0; using the default [value 0s default 1m0s]"},
+			func(c Config) bool { return c.TagGrace == time.Minute }},
 		{"key", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, []string{badKey + " [err no PEM block in private key]"},
 			func(c Config) bool { return c.App == nil }},
 		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, []string{lookback + ` [err time: invalid duration "nope" default 6h0m0s]`},
@@ -430,5 +432,30 @@ func TestTracedWiring(t *testing.T) {
 	want := `HandleFunc("GET /healthz") Handle(pattern) Handle(api.Handler(tel.Interceptors()...))`
 	if strings.Join(got, " ") != want {
 		t.Errorf("main.go's mux calls: %s, want %s (a traced route goes through route)", strings.Join(got, " "), want)
+	}
+}
+
+// TestConfigRelist: the Forgejo relist loop needs a repo and the token file; a bad repo is skipped with a warning.
+func TestConfigRelist(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		env   map[string]string
+		want  *RelistConfig
+		warns int
+	}{
+		{"off", nil, nil, 0},
+		{"no token", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": "a/b"}, nil, 1},
+		{"token, no repo", map[string]string{"BRIDGE_FORGEJO_TOKEN_FILE": "/t"}, nil, 0},
+		{"on", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": " c/d, a/b,,bad, a/b", "BRIDGE_FORGEJO_TOKEN_FILE": "/t"},
+			&RelistConfig{URL: "https://git.bnei.dev", TokenFile: "/t", Repos: []string{"a/b", "c/d"}}, 1},
+		{"url", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": "a/b", "BRIDGE_FORGEJO_TOKEN_FILE": "/t", "BRIDGE_FORGEJO_URL": "http://git.bnei.lan:3000/"},
+			&RelistConfig{URL: "http://git.bnei.lan:3000", TokenFile: "/t", Repos: []string{"a/b"}}, 1}, // plain http: a warning
+	} {
+		env := map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s"}
+		maps.Copy(env, c.env)
+		got, err := load(envOf(env))
+		if err != nil || !reflect.DeepEqual(got.Relist, c.want) || len(got.Warnings) != c.warns {
+			t.Errorf("%s: %+v, %d warnings (%v); want %+v, %d", c.name, got.Relist, len(got.Warnings), err, c.want, c.warns)
+		}
 	}
 }

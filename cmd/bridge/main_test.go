@@ -77,7 +77,8 @@ func TestForgejoHandler(t *testing.T) {
 	h := forgejoHandler(nil, github.Policy{}, secret)
 	const id = "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b"
 	push := `{"ref":"refs/heads/main","repository":{"full_name":"MohammadBnei/editable-blog"}}`
-	opened, err := os.ReadFile("../../internal/forgejo/testdata/pull_request_opened.json")
+	// synchronized keeps the delivery id as its ce_id (forgejo.factID).
+	synced, err := os.ReadFile("../../internal/forgejo/testdata/pull_request_synchronized.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestForgejoHandler(t *testing.T) {
 		{"unsigned", "push", id, push, "-", http.StatusUnauthorized},
 		{"github form", "push", id, push, "sha256=" + forgejoPost(secret, "", "", push, "").Header.Get("X-Forgejo-Signature"), http.StatusUnauthorized},
 		{"bad json", "pull_request", id, `{"action":`, "", http.StatusBadRequest},
-		{"no delivery", "pull_request", "", string(opened), "", http.StatusBadRequest},
+		{"no delivery", "pull_request_sync", "", string(synced), "", http.StatusBadRequest},
 	} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, forgejoPost(secret, c.kind, c.delivery, c.body, c.sig))
@@ -115,8 +116,9 @@ func TestForgejoRouteOff(t *testing.T) {
 	}
 }
 
-// A carried delivery is stored once per X-Forgejo-Delivery, with the Forgejo
-// policy. Needs BRIDGE_TEST_DATABASE_URL.
+// A carried fact is stored once, with the Forgejo policy: an opened is keyed on
+// its content, so a redelivery under a new X-Forgejo-Delivery is the same
+// event. Needs BRIDGE_TEST_DATABASE_URL.
 func TestForgejoHandlerStores(t *testing.T) {
 	base := os.Getenv("BRIDGE_TEST_DATABASE_URL")
 	if base == "" {
@@ -147,9 +149,9 @@ func TestForgejoHandlerStores(t *testing.T) {
 	}
 	secret := []byte("s")
 	h := forgejoHandler(st, github.Policy{Agents: map[string]bool{"ukubi-fleet": true}}, secret)
-	for i := 0; i < 2; i++ { // a second post of the same delivery is a 202 too, stored once
+	for i, delivery := range []string{"8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b", "a-manual-redelivery"} { // the second is a 202 too, stored once
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, forgejoPost(secret, "pull_request", "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b", string(body), ""))
+		h.ServeHTTP(w, forgejoPost(secret, "pull_request", delivery, string(body), ""))
 		if w.Code != http.StatusAccepted {
 			t.Fatalf("post %d: status %d, want 202: %s", i, w.Code, w.Body)
 		}
@@ -161,7 +163,7 @@ func TestForgejoHandlerStores(t *testing.T) {
 	defer func() { _ = db.Close(ctx) }()
 	var n int
 	var owned bool
-	if err := db.QueryRow(ctx, `SELECT count(*), bool_and(thread_owned) FROM events WHERE ce_id = '8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b'`).Scan(&n, &owned); err != nil {
+	if err := db.QueryRow(ctx, `SELECT count(*), bool_and(thread_owned) FROM events WHERE ce_id = 'pr/42/opened'`).Scan(&n, &owned); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 || !owned {

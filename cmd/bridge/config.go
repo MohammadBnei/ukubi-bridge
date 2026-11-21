@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,7 +20,8 @@ var envVars = []string{
 	"BRIDGE_API_CLIENTS", "BRIDGE_OIDC_ISSUER", "BRIDGE_OIDC_CLIENT_ID", "BRIDGE_OIDC_CERT", "BRIDGE_OIDC_JWKS_URL",
 	"BRIDGE_GITHUB_APP_ID", "BRIDGE_GITHUB_APP_PRIVATE_KEY", "BRIDGE_RECONCILE_LOOKBACK", "BRIDGE_ALERT_TOKEN",
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
-	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS",
+	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
+	"BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
@@ -34,6 +37,7 @@ type Config struct {
 	Trusted, Agents map[string]bool
 	AlertToken      string // "": both alert endpoints answer 503
 	Retention       time.Duration
+	TagGrace        time.Duration // how long a System-filtered stream waits for an event's tag (bus.TagGrace)
 	Port            string
 	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
 	App             *AppConfig // nil: the reconcile loop is off (no App id or no key, or a key that does not parse)
@@ -41,6 +45,7 @@ type Config struct {
 	// The Forgejo logins, apart from the GitHub ones: a name free on one forge
 	// is anyone's to claim there (ADR-0082 §12).
 	ForgejoTrusted, ForgejoAgents map[string]bool
+	Relist                        *RelistConfig // nil: the Forgejo relist loop is off (no repos, or no token file)
 
 	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
 	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
@@ -51,6 +56,13 @@ type Config struct {
 
 // OIDCConfig is how API clients sign in through authentik (ADR-0066).
 type OIDCConfig struct{ Issuer, ClientID, Cert, JWKSURL string }
+
+// RelistConfig is what the Forgejo relist loop reads.
+type RelistConfig struct {
+	URL       string   // Forgejo's base URL, default https://git.bnei.dev
+	TokenFile string   // a mounted file holding a read-only token
+	Repos     []string // owner/repo, sorted
+}
 
 // AppConfig is the GitHub App's credentials, for the reconcile loop.
 type AppConfig struct {
@@ -92,6 +104,7 @@ func load(getenv func(string) string) (Config, *configError) {
 		Agents:     set(getenv("BRIDGE_AGENT_LOGINS")),
 		AlertToken: getenv("BRIDGE_ALERT_TOKEN"),
 		Retention:  30 * 24 * time.Hour,
+		TagGrace:   time.Minute,
 		Port:       getenv("PORT"),
 
 		ForgejoTrusted: set(getenv("BRIDGE_FORGEJO_TRUSTED_LOGINS")),
@@ -105,6 +118,13 @@ func load(getenv func(string) string) (Config, *configError) {
 			c.warn("BRIDGE_RETENTION must be a Go duration of at least 24h; using the default", "value", v, "default", c.Retention.String())
 		} else {
 			c.Retention = d
+		}
+	}
+	if v := getenv("BRIDGE_TAG_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+			c.warn("BRIDGE_TAG_GRACE must be a Go duration above 0; using the default", "value", v, "default", c.TagGrace.String())
+		} else {
+			c.TagGrace = d
 		}
 	}
 	if c.Port == "" {
@@ -122,6 +142,29 @@ func load(getenv func(string) string) (Config, *configError) {
 			c.warn("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces); tracing is off", "value", shown)
 			c.Traces = ""
 		}
+	}
+	repos, tokenFile, forgejoURL := getenv("BRIDGE_FORGEJO_RELIST_REPOS"), getenv("BRIDGE_FORGEJO_TOKEN_FILE"), getenv("BRIDGE_FORGEJO_URL")
+	if forgejoURL == "" {
+		forgejoURL = "https://git.bnei.dev"
+	}
+	var watched []string
+	for r := range set(repos) {
+		if repoName.MatchString(r) {
+			watched = append(watched, r)
+		} else {
+			c.warn("BRIDGE_FORGEJO_RELIST_REPOS: not owner/repo; skipped", "value", r)
+		}
+	}
+	switch {
+	case len(watched) == 0:
+	case tokenFile == "":
+		c.warn("BRIDGE_FORGEJO_RELIST_REPOS is set without BRIDGE_FORGEJO_TOKEN_FILE; the Forgejo relist loop is off")
+	default:
+		if !strings.HasPrefix(forgejoURL, "https://") {
+			c.warn("BRIDGE_FORGEJO_URL is not https: the relist loop sends its token in clear", "value", forgejoURL)
+		}
+		slices.Sort(watched)
+		c.Relist = &RelistConfig{URL: strings.TrimSuffix(forgejoURL, "/"), TokenFile: tokenFile, Repos: watched}
 	}
 	appID, pemKey := getenv("BRIDGE_GITHUB_APP_ID"), getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
 	if appID == "" || pemKey == "" {
@@ -153,6 +196,8 @@ func (c *Config) warn(msg string, args ...any) {
 
 // fromProcess is the process's configuration: the one place that reads its environment.
 func fromProcess() (Config, *configError) { return load(os.Getenv) }
+
+var repoName = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)
 
 func set(csv string) map[string]bool {
 	m := map[string]bool{}
