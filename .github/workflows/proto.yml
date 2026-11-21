@@ -3,10 +3,22 @@
 # The same three checks as agent-fleet's go.yml `buf` job (Go plugins only).
 name: proto
 
+# Only when the schema, its generated code or the pins that produce it change
+# (the container runner is the queue bottleneck; CI speed audit 2026-11-21).
 on:
   pull_request:
+    paths:
+      - 'proto/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/proto.yml'
   push:
     branches: [main]
+    paths:
+      - 'proto/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/proto.yml'
 
 # Read-only: every step runs code from the PR (buf plugins), and a PR may be an
 # agent's. Nothing here needs more.
