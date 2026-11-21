@@ -29,7 +29,8 @@ func Verify(secret, body []byte, header string) bool {
 	return hmac.Equal(got, m.Sum(nil))
 }
 
-// Policy says who is trusted and who is a fleet agent. Logins are GitHub logins.
+// Policy says who is trusted and who is a fleet agent. Logins are one forge's:
+// main builds one Policy for GitHub and another for internal/forgejo.
 type Policy struct {
 	Trusted map[string]bool // logins whose own actions may open threads: the operator, CI
 	// Agents are fleet agent identities, tagged actor=agent and never trusted:

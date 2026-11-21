@@ -24,14 +24,18 @@ service:
 
 # Public on ONE path. The chart's IngressRoute matches
 # Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz,
-# /webhook/alertmanager, /webhook/grafana and the BridgeService API are
-# reachable only in-cluster. The baseline chain (origin lock, rate limit,
-# headers) stays on.
+# /webhook/alertmanager, /webhook/grafana, /webhook/forgejo and the
+# BridgeService API are reachable only in-cluster. The baseline chain (origin
+# lock, rate limit, headers) stays on. Forgejo (CT 305) is outside the cluster,
+# so no delivery reaches /webhook/forgejo until an internal-only route locked
+# to the Forgejo host exists (README, Not yet).
 ingress:
   pathPrefix: /webhook/github
 
 # BRIDGE_DATABASE_URL, BRIDGE_GITHUB_WEBHOOK_SECRET, BRIDGE_GITHUB_APP_ID,
-# BRIDGE_GITHUB_APP_PRIVATE_KEY and BRIDGE_ALERT_TOKEN, rendered by
+# BRIDGE_GITHUB_APP_PRIVATE_KEY, BRIDGE_ALERT_TOKEN and
+# BRIDGE_FORGEJO_WEBHOOK_SECRET (optional: without it /webhook/forgejo is
+# off, one WARN line at start; the Secret does not render it yet), rendered by
 # infra-bootstrap gitops/bootstrap/ukubi-bridge-secret.yaml. It still renders
 # the retired BRIDGE_CLIENTS too (ignored, logged at start) until ADR-0066's
 # rollout removes it. BRIDGE_OIDC_* are not secrets: they are explicit `env`
@@ -50,6 +54,14 @@ env:
   # The ukubi-fleet App's bot (App id 5395733, infra-bootstrap ADR-0062).
   - name: BRIDGE_AGENT_LOGINS
     value: "ukubi-fleet[bot]"
+  # The same two lists for Forgejo (git.bnei.dev), read by /webhook/forgejo
+  # only: ukubi-fleet and ukubi-review are free names on GitHub, so they must
+  # never be agents there. The Forgejo bot users are ukubi-fleet (writer) and
+  # ukubi-review (reviewer).
+  - name: BRIDGE_FORGEJO_TRUSTED_LOGINS
+    value: "MohammadBnei"
+  - name: BRIDGE_FORGEJO_AGENT_LOGINS
+    value: "ukubi-fleet,ukubi-review"
   # API clients are authentik service accounts (infra-bootstrap ADR-0066):
   # this table holds what each may publish and read, never a secret. Explicit
   # env, so a key of the same name in the envFrom Secret cannot override it.

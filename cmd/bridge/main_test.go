@@ -3,17 +3,24 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
+	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
 
 // An oversized body is refused before the HMAC check, whether it announces its
@@ -41,6 +48,124 @@ func TestGithubHandlerRejectsOversizedBody(t *testing.T) {
 	h.ServeHTTP(w, httptest.NewRequest("POST", "/webhook/github", strings.NewReader(big[:maxBody])))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("at cap: status %d, want 401", w.Code)
+	}
+}
+
+// forgejoPost is a Forgejo delivery. sig "" signs body with secret; "-" sends
+// an empty signature, as Forgejo does for a webhook without a secret.
+func forgejoPost(secret []byte, kind, delivery, body, sig string) *http.Request {
+	switch sig {
+	case "":
+		m := hmac.New(sha256.New, secret)
+		m.Write([]byte(body))
+		sig = hex.EncodeToString(m.Sum(nil))
+	case "-":
+		sig = ""
+	}
+	r := httptest.NewRequest("POST", "/webhook/forgejo", strings.NewReader(body))
+	r.Header.Set("X-Forgejo-Event-Type", kind)
+	r.Header.Set("X-Forgejo-Delivery", delivery)
+	r.Header.Set("X-Forgejo-Signature", sig)
+	return r
+}
+
+// Forgejo's route checks X-Forgejo-Signature before it reads a header, answers
+// 204 to a signed event it does not carry and 400 to one it cannot use. None
+// reaches the store, so nil is fine.
+func TestForgejoHandler(t *testing.T) {
+	secret := []byte("s")
+	h := forgejoHandler(nil, github.Policy{}, secret)
+	const id = "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b"
+	push := `{"ref":"refs/heads/main","repository":{"full_name":"MohammadBnei/editable-blog"}}`
+	opened, err := os.ReadFile("../../internal/forgejo/testdata/pull_request_opened.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name                 string
+		kind, delivery, body string
+		sig                  string // see forgejoPost
+		want                 int
+	}{
+		{"ignored", "push", id, push, "", http.StatusNoContent},
+		{"unsigned", "push", id, push, "-", http.StatusUnauthorized},
+		{"github form", "push", id, push, "sha256=" + forgejoPost(secret, "", "", push, "").Header.Get("X-Forgejo-Signature"), http.StatusUnauthorized},
+		{"bad json", "pull_request", id, `{"action":`, "", http.StatusBadRequest},
+		{"no delivery", "pull_request", "", string(opened), "", http.StatusBadRequest},
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, forgejoPost(secret, c.kind, c.delivery, c.body, c.sig))
+		if w.Code != c.want {
+			t.Errorf("%s: status %d, want %d", c.name, w.Code, c.want)
+		}
+	}
+}
+
+// Without BRIDGE_FORGEJO_WEBHOOK_SECRET there is no route: a delivery is a 404,
+// never read.
+func TestForgejoRouteOff(t *testing.T) {
+	for secret, want := range map[string]int{"": http.StatusNotFound, "s": http.StatusUnauthorized} {
+		mux := http.NewServeMux()
+		forgejoRoute(func(p string, h http.Handler) { mux.Handle(p, h) }, nil, Config{ForgejoSecret: secret})
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, forgejoPost(nil, "push", "d", "{}", "-"))
+		if w.Code != want {
+			t.Errorf("secret %q: status %d, want %d", secret, w.Code, want)
+		}
+	}
+}
+
+// A carried delivery is stored once per X-Forgejo-Delivery, with the Forgejo
+// policy. Needs BRIDGE_TEST_DATABASE_URL.
+func TestForgejoHandlerStores(t *testing.T) {
+	base := os.Getenv("BRIDGE_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("BRIDGE_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DROP DATABASE IF EXISTS bridge_forgejo_test WITH (FORCE)`, `CREATE DATABASE bridge_forgejo_test`} {
+		if _, err := admin.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = admin.Close(ctx)
+	u, _ := url.Parse(base)
+	u.Path = "/bridge_forgejo_test"
+	st, err := store.Open(ctx, u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+
+	body, err := os.ReadFile("../../internal/forgejo/testdata/pull_request_opened.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("s")
+	h := forgejoHandler(st, github.Policy{Agents: map[string]bool{"ukubi-fleet": true}}, secret)
+	for i := 0; i < 2; i++ { // a second post of the same delivery is a 202 too, stored once
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, forgejoPost(secret, "pull_request", "8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b", string(body), ""))
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("post %d: status %d, want 202: %s", i, w.Code, w.Body)
+		}
+	}
+	db, err := pgx.Connect(ctx, u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close(ctx) }()
+	var n int
+	var owned bool
+	if err := db.QueryRow(ctx, `SELECT count(*), bool_and(thread_owned) FROM events WHERE ce_id = '8a0f7c1e-5d2b-4e3a-9c6f-1b2d3e4f5a6b'`).Scan(&n, &owned); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || !owned {
+		t.Errorf("stored %d rows, owned=%v; want 1, true", n, owned)
 	}
 }
 

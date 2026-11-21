@@ -19,6 +19,7 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
+	"github.com/MohammadBnei/ukubi-bridge/internal/forgejo"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
@@ -74,6 +75,7 @@ func main() {
 	}
 	route := func(pattern string, h http.Handler) { mux.Handle(pattern, tel.Handler(pattern, h)) }
 	route("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
+	forgejoRoute(route, st, cfg)
 	api := bus.New(st, clients, tokens)
 	mux.Handle(api.Handler(tel.Interceptors()...))
 
@@ -149,28 +151,44 @@ func (h *handlers) wait(d time.Duration) bool {
 	return true
 }
 
-// maxBody caps a /webhook/github body (see githubHandler).
+// maxBody caps a webhook body (see readBody).
 const maxBody = 2 << 20
+
+// readBody reads a webhook body under maxBody, or answers 413 or 400 and
+// returns false. The body is read before the HMAC can be checked, so a webhook
+// path lets anyone make the pod allocate: keep the cap far under the 128Mi
+// limit. ponytail: 2 MB fits GitHub's subscribed events (PR, issue comment,
+// review: bodies cap at 65536 chars, ~800 KB worst case JSON-escaped). It is
+// not measured for Forgejo, whose body limit is not known here: an action_run
+// delivery embeds the triggering event twice (run and last_run event_payload,
+// each a JSON string escaped again), so a huge or escape-heavy PR body can
+// push a run past the cap. That is a logged 413, and the event is lost, since
+// Forgejo never retries. Raise the cap with the memory limit if the log shows it.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	tooLarge := func() ([]byte, bool) {
+		slog.Warn("webhook body over the cap: refused, 413", "path", r.URL.Path, "max", maxBody)
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	if r.ContentLength > maxBody {
+		return tooLarge()
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return tooLarge()
+		}
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	return body, true
+}
 
 func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The body is read before the HMAC can be checked, so this path lets
-		// anyone make the pod allocate: keep the cap far under the 128Mi limit.
-		// ponytail: 2 MB fits the subscribed events (PR, issue comment, review:
-		// bodies cap at 65536 chars, ~800 KB worst case JSON-escaped); raise it
-		// with the memory limit if a subscribed event ever outgrows it.
-		if r.ContentLength > maxBody {
-			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
-		if err != nil {
-			var tooBig *http.MaxBytesError
-			if errors.As(err, &tooBig) {
-				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "read body", http.StatusBadRequest)
+		body, ok := readBody(w, r)
+		if !ok {
 			return
 		}
 		if !github.Verify(secret, body, r.Header.Get("X-Hub-Signature-256")) {
@@ -206,6 +224,61 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			return
 		}
 		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "actorTrusted", e.ActorTrusted, "threadOwned", e.ThreadOwned, "new", inserted)
+		w.WriteHeader(http.StatusAccepted)
+	})
+}
+
+// forgejoRoute adds POST /webhook/forgejo when its secret is set. Unset: no
+// route (404), so an unsigned Forgejo delivery is never read. Its policy holds
+// the Forgejo logins only, never the GitHub ones.
+func forgejoRoute(route func(string, http.Handler), st *store.Store, cfg Config) {
+	if cfg.ForgejoSecret == "" {
+		slog.Warn("forgejo webhook off: BRIDGE_FORGEJO_WEBHOOK_SECRET is unset")
+		return
+	}
+	policy := github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}
+	route("POST /webhook/forgejo", forgejoHandler(st, policy, []byte(cfg.ForgejoSecret)))
+}
+
+// forgejoHandler is githubHandler for Forgejo's webhook (content type
+// application/json).
+func forgejoHandler(st *store.Store, policy github.Policy, secret []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		if !forgejo.Verify(secret, body, r.Header.Get("X-Forgejo-Signature")) {
+			http.Error(w, "bad signature", http.StatusUnauthorized)
+			return
+		}
+		kind, delivery := r.Header.Get("X-Forgejo-Event-Type"), r.Header.Get("X-Forgejo-Delivery")
+		e, err := forgejo.Normalize(policy, kind, delivery, body, time.Now())
+		if errors.Is(err, forgejo.ErrIgnored) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err != nil {
+			slog.Warn("forgejo: unusable delivery", "event", kind, "delivery", delivery, "err", err)
+			http.Error(w, "unusable payload", http.StatusBadRequest)
+			return
+		}
+		inserted, err := st.Insert(r.Context(), e)
+		if store.Invalid(err) {
+			slog.Warn("forgejo: store refused delivery", "event", kind, "delivery", delivery, "err", err)
+			http.Error(w, "unusable payload", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			// 503 marks the delivery failed in the webhook's recent deliveries.
+			// Forgejo does not retry on its own and keeps no deliveries API, so
+			// nothing redelivers it: a manual redelivery from that list is the
+			// only recovery until a reconcile loop exists.
+			slog.Error("forgejo: store", "delivery", delivery, "err", err)
+			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		slog.Info("forgejo: event", "type", e.Type, "subject", e.Subject, "actorTrusted", e.ActorTrusted, "threadOwned", e.ThreadOwned, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
 }

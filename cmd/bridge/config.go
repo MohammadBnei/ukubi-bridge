@@ -17,7 +17,8 @@ var envVars = []string{
 	"BRIDGE_DATABASE_URL", "BRIDGE_GITHUB_WEBHOOK_SECRET", "BRIDGE_TRUSTED_LOGINS", "BRIDGE_AGENT_LOGINS",
 	"BRIDGE_API_CLIENTS", "BRIDGE_OIDC_ISSUER", "BRIDGE_OIDC_CLIENT_ID", "BRIDGE_OIDC_CERT", "BRIDGE_OIDC_JWKS_URL",
 	"BRIDGE_GITHUB_APP_ID", "BRIDGE_GITHUB_APP_PRIVATE_KEY", "BRIDGE_RECONCILE_LOOKBACK", "BRIDGE_ALERT_TOKEN",
-	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
+	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
@@ -25,7 +26,8 @@ var envVars = []string{
 // the pinned certificate (auth.New) and the database URL (store.Open).
 type Config struct {
 	WebhookSecret   string
-	LegacyClients   bool // BRIDGE_CLIENTS is set: ignored, with a warning (ADR-0066)
+	ForgejoSecret   string // "": no /webhook/forgejo route
+	LegacyClients   bool   // BRIDGE_CLIENTS is set: ignored, with a warning (ADR-0066)
 	APIClients      string
 	OIDC            OIDCConfig
 	DatabaseURL     string
@@ -35,6 +37,11 @@ type Config struct {
 	Port            string
 	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
 	App             *AppConfig // nil: the reconcile loop is off (no App id or no key, or a key that does not parse)
+
+	// The Forgejo logins, apart from the GitHub ones: a name free on one forge
+	// is anyone's to claim there (ADR-0082 §12).
+	ForgejoTrusted, ForgejoAgents map[string]bool
+
 	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
 	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
 	// each at WARN. load's one refusal is a missing webhook secret; the settings only a constructor can check (the
@@ -74,6 +81,7 @@ func (e *configError) warn() { slog.Warn(e.msg, e.args...) }
 func load(getenv func(string) string) (Config, *configError) {
 	c := Config{
 		WebhookSecret: getenv("BRIDGE_GITHUB_WEBHOOK_SECRET"),
+		ForgejoSecret: getenv("BRIDGE_FORGEJO_WEBHOOK_SECRET"),
 		LegacyClients: getenv("BRIDGE_CLIENTS") != "",
 		APIClients:    getenv("BRIDGE_API_CLIENTS"),
 		OIDC: OIDCConfig{Issuer: getenv("BRIDGE_OIDC_ISSUER"), ClientID: getenv("BRIDGE_OIDC_CLIENT_ID"),
@@ -85,6 +93,9 @@ func load(getenv func(string) string) (Config, *configError) {
 		AlertToken: getenv("BRIDGE_ALERT_TOKEN"),
 		Retention:  30 * 24 * time.Hour,
 		Port:       getenv("PORT"),
+
+		ForgejoTrusted: set(getenv("BRIDGE_FORGEJO_TRUSTED_LOGINS")),
+		ForgejoAgents:  set(getenv("BRIDGE_FORGEJO_AGENT_LOGINS")),
 	}
 	if c.WebhookSecret == "" {
 		return Config{}, &configError{msg: "BRIDGE_GITHUB_WEBHOOK_SECRET is required"}

@@ -18,6 +18,28 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   agent, and a PR's head is in the same repo. The head repo is only in
   `pull_request` and `pull_request_review` payloads, so a comment on a fork PR
   can read owned. The webhook must subscribe to Issues and Pull requests.
+- `POST /webhook/forgejo` — Forgejo webhook deliveries (type Forgejo, content
+  type `application/json`), on only when `BRIDGE_FORGEJO_WEBHOOK_SECRET` is
+  set. `X-Forgejo-Signature` (hex HMAC-SHA256 of the body) is checked, then
+  `X-Forgejo-Event-Type` picks the event: `pull_request`
+  (opened/synchronized/closed/reopened/label_updated), `issues`
+  (opened/label_updated), `issue_comment` (created, on an issue or a PR), the
+  three review types as `pull_request_review.approved|rejected|comment`, and
+  `action_run.success|failure|recover`; anything else is a 204. Type
+  `dev.bnei.forge.<event>.<action>`, source `git.bnei.dev/<owner>/<repo>`,
+  `ce_id` = `X-Forgejo-Delivery`, subject `forge/<owner>/<repo>/pr|issue/<n>`,
+  or `forge/<owner>/<repo>/run/<n>` for a run (its number in the repo, as in
+  its URL). The trust facts follow the GitHub rules, on their own logins
+  (`BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS`: a name
+  listed for one forge is never trusted or an agent on the other). A run's
+  actor and owner are its trigger user, and a fork PR's run is never owned.
+  Forgejo puts the PR in a comment's payload, so a comment on a fork PR reads
+  not owned here, and a PR comment without that PR reads not owned too.
+  Forgejo neither retries nor lists its deliveries: a 503 is recovered only by
+  a manual redelivery from the webhook's settings page. A redelivery gets a
+  new `X-Forgejo-Delivery`, so a new `ce_id`: redeliver only a delivery marked
+  failed, or the event is stored twice. Not reachable yet: Forgejo runs outside
+  the cluster and the IngressRoute carries only `/webhook/github` (see Not yet).
 - GitHub reconcile: every 10 minutes the App lists its webhook deliveries back
   to the lookback window and redelivers, oldest first, each one not in
   `events` — failed (bridge downtime) or acknowledged with 202 (lost to a
@@ -121,6 +143,12 @@ after its event was deleted is a new event.
 Not yet:
 
 - An API for dead letters.
+- Forgejo: a route from Forgejo (CT 305, outside the cluster) to
+  `/webhook/forgejo`, such as an internal-only IngressRoute locked to the
+  Forgejo host; the webhook's registration and Forgejo's `ALLOWED_HOST_LIST`;
+  and a reconcile loop. Forgejo has no deliveries API, so that loop would
+  relist PRs and issues, and needs `ce_id`s derived from the content: a
+  relisted PR has no delivery UUID to dedup on.
 - A live API client. No client can call until `BRIDGE_OIDC_CERT` is set and
   the authentik `ukubi-bridge-api` provider exists (infra-bootstrap
   ADR-0066). agent-fleet's consumer is its `core/internal/dispatch` (its
@@ -212,6 +240,8 @@ loop for a private key that does not parse).
 |---|---|
 | `BRIDGE_DATABASE_URL` | Postgres URL. The primary directly, not pgbouncer (LISTEN needs session mode). |
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
+| `BRIDGE_FORGEJO_WEBHOOK_SECRET` | The Forgejo webhook's secret. Unset: `/webhook/forgejo` is off (404), logged at WARN. |
+| `BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS` | `BRIDGE_TRUSTED_LOGINS` and `BRIDGE_AGENT_LOGINS` for Forgejo logins, read by `/webhook/forgejo` only. |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |
 | `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |

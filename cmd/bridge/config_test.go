@@ -40,7 +40,8 @@ func TestConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Config{WebhookSecret: "s", Trusted: map[string]bool{}, Agents: map[string]bool{}, Retention: 720 * time.Hour, Port: "8080"}
+	want := Config{WebhookSecret: "s", Trusted: map[string]bool{}, Agents: map[string]bool{},
+		ForgejoTrusted: map[string]bool{}, ForgejoAgents: map[string]bool{}, Retention: 720 * time.Hour, Port: "8080"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)
 	}
@@ -55,6 +56,7 @@ func TestConfigEnv(t *testing.T) {
 		"BRIDGE_DATABASE_URL": "db", "BRIDGE_TRUSTED_LOGINS": " a, b,,", "BRIDGE_AGENT_LOGINS": "c",
 		"BRIDGE_ALERT_TOKEN": "t", "BRIDGE_RETENTION": "48h", "PORT": "9", "BRIDGE_GITHUB_APP_ID": "7",
 		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h",
+		"BRIDGE_FORGEJO_WEBHOOK_SECRET": "f", "BRIDGE_FORGEJO_TRUSTED_LOGINS": "d", "BRIDGE_FORGEJO_AGENT_LOGINS": "e",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +67,7 @@ func TestConfigEnv(t *testing.T) {
 	c.App = nil
 	want := Config{WebhookSecret: "s", LegacyClients: true, APIClients: "{}", OIDC: OIDCConfig{"i", "c", "pem", "j"},
 		DatabaseURL: "db", Trusted: map[string]bool{"a": true, "b": true}, Agents: map[string]bool{"c": true},
+		ForgejoSecret: "f", ForgejoTrusted: map[string]bool{"d": true}, ForgejoAgents: map[string]bool{"e": true},
 		AlertToken: "t", Retention: 48 * time.Hour, Port: "9"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)
