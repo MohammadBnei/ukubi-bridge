@@ -28,12 +28,13 @@ service:
       port: 9090
 
 # ROLLOUT ORDER: values reach ArgoCD before ukubi-ci moves the image pin, and an
-# image without :9090 would be scraped into connection refused (TargetDown, a
-# warning routed to thot). Keep this false until the pinned image serves
-# /metrics, then set it true in a follow-up. It gates the PrometheusRule too.
+# image without :9090 would be scraped into connection refused (TargetDown).
+# Switched on 2026-11-23 once the pinned image (1fbab8d, #34) served /metrics on
+# :9090 (checked through the API server proxy: every bridge_flow_enabled is 1).
+# It gates the PrometheusRule too.
 metrics:
   serviceMonitor:
-    enabled: false
+    enabled: true
     port: metrics
 
 # Public on ONE path. The chart's IngressRoute matches
