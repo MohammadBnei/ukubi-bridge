@@ -8,7 +8,7 @@
 # `runs-on: ukubi-build`; on that box `sudo buildah` is root. On Forgejo every
 # fork PR run waits for a maintainer's approval, and gets no secrets: read the
 # workflow diff of any fork PR before approving its run (the runner-label hole,
-# tracked as the CI/CD split). Tests run on the container runner (ubuntu-latest).
+# tracked as the CI/CD split). Tests run on the Talos runner (k8s-ubuntu-latest).
 # On a PR the image job builds only (image.yml's guard: no login, push or bump),
 # on the build LXC; the credential is Forgejo OIDC, which Infisical refuses to
 # any PR run.
@@ -39,39 +39,43 @@ permissions:
   contents: read
 
 jobs:
-  # Forgejo's container runner (ubuntu-latest), so the store tests get a real
-  # Postgres from a service container and never touch the build runner.
+  # The Talos runner (k8s-ubuntu-latest): no service containers there, so the
+  # database tests get a disposable database from the dev IntegreSQL (ADR-0088,
+  # ukubi-ci's dev-db action). The tests create further databases of their own on
+  # that Postgres (the integresql_test role has CREATEDB).
   test:
-    runs-on: ubuntu-latest
+    runs-on: k8s-ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
-    services:
-      postgres:
-        image: postgres:18.7-alpine
-        env:
-          POSTGRES_PASSWORD: t
-        options: >-
-          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
-    env:
-      # On Forgejo the job runs in a container: the service is reached by its name.
-      BRIDGE_TEST_DATABASE_URL: postgres://postgres:t@postgres:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - name: Dev database
+        uses: MohammadBnei/ukubi-ci/actions/dev-db@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
+        with:
+          integresql-url: http://integresql.dev-services.svc.cluster.local:5000
+          postgres-host: dev-postgres.dev-services.svc.cluster.local
+          # An empty template: the store migrates on Open, so there is nothing to seed.
+          template-hash: bridge
+          timeout-seconds: '120'
       - name: go vet + go test
         run: |
           set -euo pipefail
+          export BRIDGE_TEST_DATABASE_URL="$DATABASE_URL"
           go vet ./...
           go test -race ./...
+      - name: Give the dev database back
+        if: always()
+        uses: MohammadBnei/ukubi-ci/actions/dev-db-release@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
 
   # golangci-lint v2.14.0, as agent-fleet's go.yml pins it (the version built
   # with the go1.27.4 this module declares; a linter built with an older Go
   # refuses a newer module). Default linters, no config file.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: k8s-ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
