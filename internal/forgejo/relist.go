@@ -285,6 +285,7 @@ func (r *Relister) relist(ctx context.Context, token, repo string, now time.Time
 			continue
 		}
 		e.ActorTrusted = false // see the top of this file
+		e.Producer = event.Producer("route", "forgejo-relist")
 		inserted, err := r.Insert(ctx, e)
 		if err != nil {
 			return n, err

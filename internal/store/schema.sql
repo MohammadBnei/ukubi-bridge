@@ -47,6 +47,9 @@ CREATE INDEX IF NOT EXISTS dead_letters_parked ON dead_letters (subscription, su
 -- The GitHub reconcile loop looks deliveries up by GUID alone.
 CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
 
+-- The raw ingest path of an event (event.Producer); null for rows from before it.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS producer jsonb;
+
 -- Retention (infra-bootstrap ADR-0066 §6). A deletion run records a gap on a
 -- subscription that lost matching events it never acked; Subscribe sends it
 -- first, and the subscriber's ConfirmGap (with gap_ver) clears it.

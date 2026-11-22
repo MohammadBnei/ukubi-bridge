@@ -20,6 +20,8 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
+	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
+	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/forgejo"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
 	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
@@ -105,6 +107,7 @@ func main() {
 		go tokens.Watch(ctx, cfg.OIDC.JWKSURL, &http.Client{Timeout: 10 * time.Second}, time.Hour)
 	}
 	go retain(ctx, api, st, cfg.Retention, time.Hour)
+	go contract.Run(ctx, cfg.ContractFile, time.Minute)
 
 	if r := reconciler(st, cfg.App); r != nil {
 		metrics.Enable(metrics.GithubReconcile)
@@ -254,6 +257,7 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			http.Error(w, "unusable payload", http.StatusBadRequest)
 			return
 		}
+		e.Producer = event.Producer("route", "github-webhook")
 		inserted, err := st.Insert(r.Context(), e)
 		if store.Invalid(err) {
 			slog.Warn("github: store refused delivery", "event", kind, "delivery", delivery, "err", err)
@@ -314,6 +318,7 @@ func forgejoHandler(st *store.Store, policy github.Policy, secret []byte) http.H
 			http.Error(w, "unusable payload", http.StatusBadRequest)
 			return
 		}
+		e.Producer = event.Producer("route", "forgejo-webhook")
 		inserted, err := st.Insert(r.Context(), e)
 		if store.Invalid(err) {
 			slog.Warn("forgejo: store refused delivery", "event", kind, "delivery", delivery, "err", err)

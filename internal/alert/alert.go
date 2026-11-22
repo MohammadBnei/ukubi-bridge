@@ -44,13 +44,14 @@ func Normalize(source string, raw json.RawMessage, now time.Time) (event.Event, 
 		return event.Event{}, errSkip
 	}
 	return event.Event{
-		ID:      a.Fingerprint + ":" + a.Status + ":" + a.StartsAt,
-		Source:  source,
-		Type:    "dev.bnei.alert." + a.Status,
-		Subject: "alert/" + a.Fingerprint,
-		Time:    now,
-		Data:    raw, // verbatim: every label, annotation and URL survives
-		Actor:   event.ActorMachine,
+		ID:       a.Fingerprint + ":" + a.Status + ":" + a.StartsAt,
+		Source:   source,
+		Type:     "dev.bnei.alert." + a.Status,
+		Subject:  "alert/" + a.Fingerprint,
+		Time:     now,
+		Data:     raw, // verbatim: every label, annotation and URL survives
+		Actor:    event.ActorMachine,
+		Producer: event.Producer("route", source),
 		// Neither trust fact: an alert never wakes a session on its own (ADR-0071 §6).
 	}, nil
 }

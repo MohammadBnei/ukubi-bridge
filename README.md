@@ -370,6 +370,34 @@ readable too, though kwatch lists `type=Warning` only). Not running yet: it need
   `:9000`;
 - `BRIDGE_OIDC_CERT` set on the bridge.
 
+## Event contract
+
+`contract/events.yaml` lists the shared event types the bridge's adapters and known clients emit: per type its
+subject pattern, the exact `ce_id` recipe (`ce_id_kind: fact` is derived from the fact, so a retry or a relisted
+copy is the same event; `transport` is a delivery id, so a redelivery is stored twice), its producer and its trust
+facts. The same file is the ConfigMap `ukubi-bridge-contract` in `helm/values.yaml` (a test keeps them identical),
+mounted as a directory so an edit reaches the pod without a restart. `dev.bnei.agent.*` is a prefix: agents name
+their own types under it.
+
+An event whose type is not in the contract is still stored and delivered, with `flags: ["uncontracted"]` on the
+`CloudEvent`. Flags are computed at delivery against the current contract, so blessing a type unflags its backlog
+(replays included). **A consumer must ack and skip an event that carries any flag** (never leave it unacked, which
+blocks its own stream, and never nack it, which redelivers it); every flag means skip, so an informational flag needs
+a new field. Each stored uncontracted event is logged once at ingest (`event type uncontracted`, with its producer); the
+chart's Loki rule alerts on it. The contract is knowledge, never trust: if no contract has ever loaded (unset, missing
+or unparsable file), nothing is flagged and, for a missing or unparsable file, the bridge logs `event contract not loaded` every minute; a failed reload
+logs `event contract not reloaded` and keeps the last good copy. A second Loki rule alerts on both. The runtime parser
+ignores unknown fields (an old image accepts a newer contract); a test applies the strict check. The ConfigMap volume is
+`optional`, so a missing ConfigMap never keeps the pod from starting.
+
+To bless a type: add its entry to `contract/events.yaml` and the same text to `helm/values.yaml`
+(`go test ./internal/bus` checks the copy; adapter tests fail when a type they build is missing), merge, and let
+ArgoCD sync: the bridge picks it up within a few minutes of the sync (kubelet's ConfigMap refresh plus the 60 s poll). Land a values change that adds the contract together with the image pin that reads it, so the single writer restarts once.
+
+Every event also stores its raw producer in `events.producer` (jsonb, null before this): `{"kind":"client","name":...}`
+for an API client (the name is the verified token subject, which is the client table key), `{"kind":"route","name":...}` for `forgejo-webhook`, `forgejo-relist`, `github-webhook`,
+`alertmanager` or `grafana`.
+
 ## Errors
 
 Every error a BridgeService handler returns carries Connect's code, the same words as before, and an
@@ -435,6 +463,7 @@ loop for a private key that does not parse).
 | `BRIDGE_FORGEJO_RELIST_REPOS` | Comma-separated `owner/repo` the Forgejo relist loop watches. Unset or empty: the loop is off. An entry that is not `owner/repo` is skipped with a warning. |
 | `BRIDGE_FORGEJO_TOKEN_FILE` | Path of a mounted file holding a Forgejo token with `read:repository` and `read:issue` only, read on every run (a rotation needs no restart). Without it the relist loop is off, with a warning. |
 | `BRIDGE_TAG_GRACE` | How long a System-filtered stream holds an untagged event for its tag before it gaps it, a Go duration above 0, default `60s`. |
+| `BRIDGE_CONTRACT_FILE` | Path of the event contract (`contract/events.yaml`), read at start and every 60 s; a bad or missing file keeps the last good one, logged at WARN. Unset or never loaded: nothing is flagged (see Event contract). |
 | `BRIDGE_FORGEJO_URL` | Forgejo's base URL for the relist loop, default `https://git.bnei.dev`; every page is fetched from this host. Not `https://`: a warning (the token goes in clear). |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |

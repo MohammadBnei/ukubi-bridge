@@ -46,6 +46,20 @@ func TestInsertDedup(t *testing.T) {
 	}
 }
 
+// The raw producer is written by Insert (nothing reads it back yet; atlas's read path is open).
+func TestInsertProducer(t *testing.T) {
+	s := open(t)
+	e := ev("p")
+	e.Producer = event.Producer("route", "x")
+	if _, err := s.Insert(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.db.QueryRow(context.Background(), `SELECT producer::text FROM events WHERE ce_id = 'p'`).Scan(&got); err != nil || got != `{"kind": "route", "name": "x"}` {
+		t.Fatalf("producer %q %v", got, err)
+	}
+}
+
 // jsonb rejects \u0000; Insert must store the payload, not fail forever.
 func TestInsertNullEscape(t *testing.T) {
 	s := open(t)

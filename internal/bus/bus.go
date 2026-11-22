@@ -18,6 +18,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
@@ -338,6 +339,7 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 		Actor: p.GetActor(), ActorLogin: p.GetActorLogin(), ActorTrusted: p.GetActorTrusted(),
 		Owner: p.GetOwner(),
 		Hops:  int(p.GetHops()), CausationID: p.GetCausationId(),
+		Producer: event.Producer("client", c.Name),
 	}
 	if p.GetTime() != nil {
 		e.Time = p.GetTime().AsTime()
@@ -744,6 +746,10 @@ func toProto(e event.Event, replayed bool) *bridgev1.CloudEvent {
 		Seq: e.Seq, Id: e.ID, Source: e.Source, Type: e.Type, Subject: e.Subject,
 		Time: timestamppb.New(e.Time), Data: e.Data, Actor: e.Actor, ActorLogin: e.ActorLogin,
 		ActorTrusted: e.ActorTrusted, ThreadOwned: e.ThreadOwned, Owner: e.Owner, Hops: int32(e.Hops), CausationId: e.CausationID,
-		Replayed: replayed,
+		Replayed: replayed, Flags: flags(e),
 	}
 }
+
+// flags are computed at delivery against the contract as it is now, so blessing
+// a type unflags its backlog. With no contract loaded nothing is flagged.
+func flags(e event.Event) []string { return contract.Flags(e.Type) }

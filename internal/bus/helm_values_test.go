@@ -6,6 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/yaml"
+
+	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 )
 
 // The client table shipped in helm/values.yaml must parse, and keep the
@@ -81,5 +85,107 @@ func TestHelmClientTable(t *testing.T) {
 	if len(kwatch.Subscribe) != 0 || !slices.Equal(kwatch.PublishTypes, []string{"dev.bnei.deploy.", "dev.bnei.k8s."}) ||
 		!slices.Equal(kwatch.PublishSubjects, []string{"argocd/", "k8s/"}) {
 		t.Errorf("bridge-kwatch: %+v", kwatch)
+	}
+}
+
+// The contract ConfigMap in helm/values.yaml is contract/events.yaml byte for byte, mounted where
+// BRIDGE_CONTRACT_FILE reads it.
+func TestHelmContract(t *testing.T) {
+	b, err := os.ReadFile("../../helm/values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		ExtraManifests []string `json:"extraManifests"`
+		Env            []struct{ Name, Value string }
+		Mounts         []struct{ Name, MountPath, SubPath string } `json:"extraVolumeMounts"`
+		Volumes        []struct {
+			Name      string
+			ConfigMap struct {
+				Name     string
+				Optional bool
+			}
+		} `json:"extraVolumes"`
+	}
+	if err := yaml.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	var cm struct {
+		Kind     string
+		Metadata struct{ Name string }
+		Data     map[string]string
+	}
+	found := false
+	for _, m := range v.ExtraManifests {
+		if err := yaml.Unmarshal([]byte(m), &cm); err == nil && cm.Kind == "ConfigMap" && cm.Metadata.Name == "ukubi-bridge-contract" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ConfigMap ukubi-bridge-contract not found in extraManifests")
+	}
+	want, err := os.ReadFile("../../contract/events.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(want), "{{") {
+		t.Error(`the chart runs extraManifests through tpl: "{{" would be rendered`)
+	}
+	if !slices.ContainsFunc(v.Volumes, func(x struct {
+		Name      string
+		ConfigMap struct {
+			Name     string
+			Optional bool
+		}
+	}) bool {
+		return x.Name == "contract" && x.ConfigMap.Name == "ukubi-bridge-contract" && x.ConfigMap.Optional
+	}) {
+		t.Error("volume contract must be the optional ConfigMap ukubi-bridge-contract")
+	}
+	if cm.Data["events.yaml"] != string(want) {
+		t.Error("helm/values.yaml's contract differs from contract/events.yaml: copy it in, indented")
+	}
+	file := ""
+	for _, e := range v.Env {
+		if e.Name == "BRIDGE_CONTRACT_FILE" {
+			file = e.Value
+		}
+	}
+	if !slices.ContainsFunc(v.Mounts, func(m struct{ Name, MountPath, SubPath string }) bool {
+		return m.Name == "contract" && m.SubPath == "" && file == m.MountPath+"/events.yaml" // subPath would break hot reload
+	}) {
+		t.Errorf("BRIDGE_CONTRACT_FILE %q is not events.yaml in the contract mount", file)
+	}
+}
+
+// Every type prefix a client may publish has a contract entry under it, so its events are not flagged
+// on day one (and a consumer that skips flags does not drop them).
+func TestClientGrantsContracted(t *testing.T) {
+	b, err := os.ReadFile("../../helm/values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)name: BRIDGE_API_CLIENTS\n\s+value: \|\n((?:\s{6}.*\n)+)`).FindSubmatch(b)
+	if m == nil {
+		t.Fatal("BRIDGE_API_CLIENTS block not found")
+	}
+	cs, err := ParseClients(strings.TrimSpace(string(m[1])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("../../contract/events.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	es, err := contract.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range cs {
+		for _, p := range c.PublishTypes {
+			if !slices.ContainsFunc(es, func(e contract.Entry) bool { return strings.HasPrefix(strings.TrimSuffix(e.Type, "*"), p) }) {
+				t.Errorf("%s may publish %s but no contract entry is under it", name, p)
+			}
+		}
 	}
 }

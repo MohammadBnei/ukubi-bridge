@@ -2,14 +2,17 @@ package alert
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 )
@@ -85,6 +88,9 @@ func TestAlertmanagerFiringRepeatResolved(t *testing.T) {
 	if r.Type != "dev.bnei.alert.resolved" || r.Subject != f.Subject || r.ID == f.ID {
 		t.Errorf("resolved envelope: %+v", r)
 	}
+	if string(f.Producer) != `{"kind":"route","name":"alertmanager"}` {
+		t.Errorf("producer %s", f.Producer)
+	}
 	if !strings.Contains(string(f.Data), "generatorURL") {
 		t.Errorf("raw alert not kept: %s", f.Data)
 	}
@@ -139,5 +145,21 @@ func TestHandlerCountsEvents(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(metrics.EventsFor("alertmanager", "dev.bnei.alert.firing")); got < 1 {
 		t.Errorf("events_total %v, want at least 1", got)
+	}
+}
+
+// Both statuses an alert can have build a type the event contract lists.
+func TestTypesContracted(t *testing.T) {
+	if err := contract.Load("../../contract/events.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"firing", "resolved"} {
+		e, err := Normalize("alertmanager", json.RawMessage(`{"status":"`+status+`","fingerprint":"f","startsAt":"t"}`), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !contract.Known(e.Type) {
+			t.Errorf("%s builds %s: not in contract/events.yaml", status, e.Type)
+		}
 	}
 }

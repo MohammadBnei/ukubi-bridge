@@ -54,7 +54,11 @@ type CloudEvent struct {
 	// ours. A fork PR is never owned, but the head repo is only in
 	// pull_request and pull_request_review payloads: a comment on a fork PR
 	// can read owned. GitHub events only; Publish always clears it.
-	ThreadOwned   bool `protobuf:"varint,16,opt,name=thread_owned,json=threadOwned,proto3" json:"thread_owned,omitempty"`
+	ThreadOwned bool `protobuf:"varint,16,opt,name=thread_owned,json=threadOwned,proto3" json:"thread_owned,omitempty"`
+	// Set by the bridge on delivery, never on Publish. "uncontracted": the
+	// event's type is not in the bridge's event contract (only flagged once a
+	// contract has loaded). Consumers must ack and skip an event carrying any flag.
+	Flags         []string `protobuf:"bytes,17,rep,name=flags,proto3" json:"flags,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -192,6 +196,13 @@ func (x *CloudEvent) GetThreadOwned() bool {
 		return x.ThreadOwned
 	}
 	return false
+}
+
+func (x *CloudEvent) GetFlags() []string {
+	if x != nil {
+		return x.Flags
+	}
+	return nil
 }
 
 type PublishRequest struct {
@@ -1126,7 +1137,7 @@ var File_bridge_v1_bridge_proto protoreflect.FileDescriptor
 
 const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\n" +
-	"\x16bridge/v1/bridge.proto\x12\tbridge.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaf\x03\n" +
+	"\x16bridge/v1/bridge.proto\x12\tbridge.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc5\x03\n" +
 	"\n" +
 	"CloudEvent\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x03R\x03seq\x12\x0e\n" +
@@ -1144,7 +1155,8 @@ const file_bridge_v1_bridge_proto_rawDesc = "" +
 	"\fcausation_id\x18\r \x01(\tR\vcausationId\x12\x1a\n" +
 	"\breplayed\x18\x0e \x01(\bR\breplayed\x12#\n" +
 	"\ractor_trusted\x18\x0f \x01(\bR\factorTrusted\x12!\n" +
-	"\fthread_owned\x18\x10 \x01(\bR\vthreadOwnedJ\x04\b\n" +
+	"\fthread_owned\x18\x10 \x01(\bR\vthreadOwned\x12\x14\n" +
+	"\x05flags\x18\x11 \x03(\tR\x05flagsJ\x04\b\n" +
 	"\x10\vR\atrusted\"=\n" +
 	"\x0ePublishRequest\x12+\n" +
 	"\x05event\x18\x01 \x01(\v2\x15.bridge.v1.CloudEventR\x05event\"/\n" +

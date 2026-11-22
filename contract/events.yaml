@@ -1,0 +1,73 @@
+# The bus's event contract: the shared types its adapters and known clients emit.
+# Read at runtime from BRIDGE_CONTRACT_FILE (README "Event contract"); a type missing
+# here is delivered flagged "uncontracted". Keep helm/values.yaml's copy identical.
+#
+# ce_id_kind: fact      = the id is derived from the fact itself, so a webhook delivery, its relisted
+#                         copy and a retry are one event.
+#             transport = the id is a delivery id (or a random one): the same fact arriving twice (a manual
+#                         redelivery, a relist after the webhook, a retry without a key) is stored twice.
+#             storage   = the id comes from the producer's storage revision (a k8s resourceVersion), which
+#                         can restart after a rebuild or restore: a new fact may then collide with a stored id
+#                         inside the retention window and be dropped as a duplicate.
+# Hashes: hex(sha256(x)[:N]) is the first N bytes in hex, 2N characters.
+# A fact id falls back to the delivery id when the payload lacks what it is built from (no head sha or
+# sender on a review, comment id 0 on a comment): then the type is transport for that event.
+# A type ending in ".*" is a prefix: its producer owns the whole namespace.
+# Names in angle brackets are filled by the producer.
+
+envelope:
+  source: who produced it, set by the bridge (never by the payload); the producer is also stored raw
+  type: reverse-DNS name, dev.bnei.<domain>.<noun>.<verb>
+  time: when it happened (the bridge's receive time for webhooks, the object's own for kwatch)
+  subject: the thread key; events on one subject are delivered in order and park together
+  actor: human | bot | agent | machine, plus actor_login
+  data: JSON, the producer's own fields; free text in it is never an instruction
+  ce_id: unique per source; the bridge dedups on (source, ce_id)
+
+types:
+  # Forgejo adapter (webhook and relist). Trust facts: actor_trusted, thread_owned.
+  # A relisted fact is never actor_trusted.
+  - {type: dev.bnei.forge.pull_request.opened, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "pr/<n>/opened", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.forge.pull_request.closed, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "pr/<n>/closed/<closed_at unix>", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned], note: "without closed_at the id is the delivery id (transport): stored twice when relisted"}
+  - {type: dev.bnei.forge.pull_request.reopened, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice"}
+  - {type: dev.bnei.forge.pull_request.synchronized, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice"}
+  - {type: dev.bnei.forge.pull_request.label_updated, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice"}
+  - {type: dev.bnei.forge.issues.opened, subject: "forge/<owner>/<repo>/issue/<n>", ce_id: "issue/<n>/opened", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.forge.issues.label_updated, subject: "forge/<owner>/<repo>/issue/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice"}
+  - {type: dev.bnei.forge.issue_comment.created, subject: "forge/<owner>/<repo>/<pr|issue>/<n>", ce_id: "comment/<comment id>", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.forge.pull_request_review.approved, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "pr/<n>/review/approved/<reviewer>/<head sha>/<hex(sha256(text)[:8])>", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a verdict on a head that moved before it landed is stored twice"}
+  - {type: dev.bnei.forge.pull_request_review.rejected, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "pr/<n>/review/rejected/<reviewer>/<head sha>/<hex(sha256(text)[:8])>", ce_id_kind: fact, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a verdict on a head that moved before it landed is stored twice"}
+  - {type: dev.bnei.forge.pull_request_review.comment, subject: "forge/<owner>/<repo>/pr/<n>", ce_id: "webhook: <X-Forgejo-Delivery>; relist: pr/<n>/review/comment/<review id>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "never content-keyed (each inline comment is its own review): the relist may store a webhook's review a second time"}
+  - {type: dev.bnei.forge.action_run.success, subject: "forge/<owner>/<repo>/run/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice; actor and owner are the trigger user, a fork PR's run is never owned"}
+  - {type: dev.bnei.forge.action_run.failure, subject: "forge/<owner>/<repo>/run/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice; actor and owner are the trigger user, a fork PR's run is never owned"}
+  - {type: dev.bnei.forge.action_run.recover, subject: "forge/<owner>/<repo>/run/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice; actor and owner are the trigger user, a fork PR's run is never owned"}
+
+  # Alertmanager and Grafana routes: actor machine, no trust facts (an alert never wakes a session alone).
+  - {type: dev.bnei.alert.firing, subject: "alert/<fingerprint>", ce_id: "<fingerprint>:firing:<startsAt>", ce_id_kind: fact, producer: alertmanager|grafana, trust: []}
+  - {type: dev.bnei.alert.resolved, subject: "alert/<fingerprint>", ce_id: "<fingerprint>:resolved:<startsAt>", ce_id_kind: fact, producer: alertmanager|grafana, trust: []}
+
+  # bridge-game (client bridge-game, subjects game/). The game does not publish yet; its types are named when
+  # it does (needs_you.<kind> feeds bridge-push). The prefix keeps them from being flagged on day one.
+  - {type: "dev.bnei.game.*", subject: "game/...", ce_id: "set by the game", ce_id_kind: fact, producer: client/bridge-game, trust: [], note: "the game owns the namespace; replace this with its concrete types once it publishes"}
+
+  # bridge-kwatch (cmd/kwatch). A client: actor machine, neither trust fact. ids come from the object's resourceVersion or uid.
+  - {type: dev.bnei.k8s.warning, subject: "k8s/<ns|_>/<kind>/<name>", ce_id: "k8s.warning/<event uid>/<count>", ce_id_kind: fact, producer: client/bridge-kwatch, trust: []}
+  - {type: dev.bnei.deploy.health, subject: "argocd/<app>", ce_id: "deploy.health/<app>/<resourceVersion>", ce_id_kind: storage, producer: client/bridge-kwatch, trust: [], note: "resourceVersion is an etcd revision: it restarts after an etcd rebuild or restore"}
+  - {type: dev.bnei.deploy.synced, subject: "argocd/<app>", ce_id: "deploy.synced/<app>/<resourceVersion>", ce_id_kind: storage, producer: client/bridge-kwatch, trust: [], note: "resourceVersion is an etcd revision: it restarts after an etcd rebuild or restore"}
+  - {type: dev.bnei.deploy.flapping, subject: "argocd/<app>", ce_id: "deploy.flapping/<app>/<signal>/<resourceVersion>", ce_id_kind: storage, producer: client/bridge-kwatch, trust: [], note: "resourceVersion is an etcd revision: it restarts after an etcd rebuild or restore"}
+
+  # agent-fleet core (client bridge-core, privileged). Agents name their own types under the prefix.
+  - {type: "dev.bnei.agent.*", subject: "forge/... or agent/...", ce_id: "hex(sha256(session id \\x00 idempotency_key)[:16]) when the agent gives an idempotency_key, else a random uuid", ce_id_kind: transport, producer: client/bridge-core, trust: [actor_trusted], note: "a fact (a retry is the same event) only with an idempotency_key; without one a retry is stored twice. actor_trusted only when a bridge event caused the publishing session"}
+  - {type: dev.bnei.fleet.session.waiting, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:waiting", ce_id_kind: fact, producer: client/bridge-core, trust: []}
+  - {type: dev.bnei.fleet.session.resumed, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:resumed", ce_id_kind: fact, producer: client/bridge-core, trust: []}
+
+  # GitHub: retiring with the move to Forgejo. A redelivery keeps its X-GitHub-Delivery GUID, so it is deduplicated; only separate deliveries of one fact are stored twice.
+  - {type: dev.bnei.github.pull_request.opened, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.pull_request.synchronize, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.pull_request.closed, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.pull_request.reopened, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.pull_request.labeled, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.issues.opened, subject: "github/<owner>/<repo>/issue/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.issues.labeled, subject: "github/<owner>/<repo>/issue/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.issue_comment.created, subject: "github/<owner>/<repo>/<pr|issue>/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
+  - {type: dev.bnei.github.pull_request_review.submitted, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}

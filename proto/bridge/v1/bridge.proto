@@ -40,6 +40,10 @@ message CloudEvent {
   // pull_request and pull_request_review payloads: a comment on a fork PR
   // can read owned. GitHub events only; Publish always clears it.
   bool thread_owned = 16;
+  // Set by the bridge on delivery, never on Publish. "uncontracted": the
+  // event's type is not in the bridge's event contract (only flagged once a
+  // contract has loaded). Consumers must ack and skip an event carrying any flag.
+  repeated string flags = 17;
 }
 
 // BridgeService is the bus API. Callers authenticate with an authentik access

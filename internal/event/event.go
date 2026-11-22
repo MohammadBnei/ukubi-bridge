@@ -39,4 +39,14 @@ type Event struct {
 	Hops         int
 	CausationID  string
 	Replayed     bool
+
+	// Producer is the raw ingest path, stored beside the event (never in it):
+	// {"kind":"client","name":...} or {"kind":"route","name":...}; later also ns, sa, pod.
+	Producer json.RawMessage
+}
+
+// Producer builds the raw producer record for kind "client" or "route".
+func Producer(kind, name string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"kind": kind, "name": name}) // strings only: cannot fail
+	return b
 }

@@ -22,7 +22,7 @@ var envVars = []string{
 	"BRIDGE_GITHUB_APP_ID", "BRIDGE_GITHUB_APP_PRIVATE_KEY", "BRIDGE_RECONCILE_LOOKBACK", "BRIDGE_ALERT_TOKEN",
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
 	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
-	"BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE",
+	"BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE", "BRIDGE_CONTRACT_FILE",
 	"BRIDGE_METRICS_ADDR",
 }
 
@@ -40,6 +40,7 @@ type Config struct {
 	AlertToken      string // "": both alert endpoints answer 503
 	Retention       time.Duration
 	TagGrace        time.Duration // how long a System-filtered stream waits for an event's tag (bus.TagGrace)
+	ContractFile    string        // "": no event contract, nothing is flagged
 	Port            string
 	MetricsAddr     string     // BRIDGE_METRICS_ADDR: where /metrics is served, apart from the public port
 	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
@@ -109,6 +110,8 @@ func load(getenv func(string) string) (Config, *configError) {
 		Retention:  30 * 24 * time.Hour,
 		TagGrace:   time.Minute,
 		Port:       getenv("PORT"),
+
+		ContractFile: getenv("BRIDGE_CONTRACT_FILE"),
 
 		ForgejoTrusted: set(getenv("BRIDGE_FORGEJO_TRUSTED_LOGINS")),
 		ForgejoAgents:  set(getenv("BRIDGE_FORGEJO_AGENT_LOGINS")),

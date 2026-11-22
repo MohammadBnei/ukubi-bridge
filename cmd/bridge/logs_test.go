@@ -25,8 +25,8 @@ func TestAlertLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	filters := regexp.MustCompile("\\|[=~] (?:\"([^\"]+)\"|`([^`]+)`)").FindAllStringSubmatch(string(values), -1)
-	if len(filters) != 2 {
-		t.Fatalf("%d line filters in the chart, want the 2 this test was written for", len(filters)) // the positive control
+	if len(filters) != 5 {
+		t.Fatalf("%d line filters in the chart, want the 5 this test was written for", len(filters)) // the positive control
 	}
 	messages := logMessages(t)
 	for _, f := range filters {

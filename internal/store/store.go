@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 )
 
@@ -114,12 +116,12 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	var id int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO events (source, ce_id, type, subject, actor, actor_login, actor_trusted, thread_owned,
-		                    owner, hops, causation_id, replayed, data, time)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                    owner, hops, causation_id, replayed, data, time, producer)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (source, ce_id) DO NOTHING
 		RETURNING id`,
 		e.Source, e.ID, e.Type, e.Subject, e.Actor, e.ActorLogin, e.ActorTrusted, e.ThreadOwned,
-		e.Owner, e.Hops, e.CausationID, e.Replayed, e.Data, e.Time).Scan(&id)
+		e.Owner, e.Hops, e.CausationID, e.Replayed, e.Data, e.Time, e.Producer).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -129,7 +131,14 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, '')`, notifyChannel); err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	// The one ingest choke point: logged once per stored event (the chart's Loki rule alerts on this line).
+	if contract.Flags(e.Type) != nil {
+		slog.Warn("event type uncontracted", "type", e.Type, "source", e.Source, "producer", string(e.Producer))
+	}
+	return true, nil
 }
 
 // Invalid reports whether Postgres refused err's values themselves (class 22
