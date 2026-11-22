@@ -32,6 +32,41 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+          cache: false # the split is explicit, see Cache keys
+      # Cache model (owner decision 2026-11-22): a PR restores and saves; push, tag,
+      # dispatch, schedule and workflow_call from main never restore (a PR job can forge
+      # the cache write key), they run cold and only save. Decided here in shell, not in an if:.
+      # CACHE_EPOCH is a user-level Forgejo variable; bump it to purge every cache at once.
+      - name: Cache keys
+        id: cachekeys
+        env:
+          REF: ${{ github.ref }}
+          EPOCH: ${{ vars.CACHE_EPOCH || 'e1' }}
+        run: |
+          set -euo pipefail
+          pr=false
+          if [[ "$REF" == refs/pull/* ]]; then pr=true; fi
+          h=$({ cat go.mod; [ ! -f go.sum ] || cat go.sum; } | sha256sum | cut -c1-16)
+          {
+            echo "pr=$pr"
+            echo "base=${EPOCH}-go-test-${RUNNER_OS}-${h}"
+            echo "prefix=${EPOCH}-go-test-${RUNNER_OS}-"
+            echo "mod=$(go env GOMODCACHE)"
+            echo "build=$(go env GOCACHE)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go cache
+        if: steps.cachekeys.outputs.pr == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cachekeys.outputs.mod }}
+            ${{ steps.cachekeys.outputs.build }}
+          # Never an exact hit (the run id is new): restore-keys picks the newest entry.
+          key: ${{ steps.cachekeys.outputs.base }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekeys.outputs.base }}-
+            ${{ steps.cachekeys.outputs.prefix }}
       - name: Dev database
         uses: MohammadBnei/ukubi-ci/actions/dev-db@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
         with:
@@ -45,7 +80,23 @@ jobs:
           set -euo pipefail
           export BRIDGE_TEST_DATABASE_URL="$DATABASE_URL"
           go vet ./...
-          go test -race ./...
+          # Packages whose tests use the dev database run with -count=1 (Go cannot
+          # track database state); every other package may come from Go's test cache.
+          # Same flags, so the compiled test binaries are shared.
+          unc=(./cmd/bridge ./internal/store ./internal/bus)
+          go list "${unc[@]}" > "$RUNNER_TEMP/uncached.txt"
+          rest=()
+          while IFS= read -r pkg; do rest+=("$pkg"); done < <(go list ./... | grep -vxFf "$RUNNER_TEMP/uncached.txt" || true)
+          [ ${#rest[@]} -eq 0 ] || go test -race "${rest[@]}"
+          go test -race -count=1 "${unc[@]}"
+      - name: Save Go cache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cachekeys.outputs.mod }}
+            ${{ steps.cachekeys.outputs.build }}
+          key: ${{ steps.cachekeys.outputs.base }}-${{ github.run_id }}
+
       - name: Give the dev database back
         if: always()
         uses: MohammadBnei/ukubi-ci/actions/dev-db-release@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
@@ -63,6 +114,53 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+          cache: false # the split is explicit, see Cache keys
+      # Cache model (owner decision 2026-11-22): a PR restores and saves; push, tag,
+      # dispatch, schedule and workflow_call from main never restore (a PR job can forge
+      # the cache write key), they run cold and only save. Decided here in shell, not in an if:.
+      # CACHE_EPOCH is a user-level Forgejo variable; bump it to purge every cache at once.
+      - name: Cache keys
+        id: cachekeys
+        env:
+          REF: ${{ github.ref }}
+          EPOCH: ${{ vars.CACHE_EPOCH || 'e1' }}
+        run: |
+          set -euo pipefail
+          pr=false
+          if [[ "$REF" == refs/pull/* ]]; then pr=true; fi
+          h=$({ cat go.mod; [ ! -f go.sum ] || cat go.sum; } | sha256sum | cut -c1-16)
+          {
+            echo "pr=$pr"
+            echo "base=${EPOCH}-go-lint-${RUNNER_OS}-${h}"
+            echo "prefix=${EPOCH}-go-lint-${RUNNER_OS}-"
+            echo "mod=$(go env GOMODCACHE)"
+            echo "build=$(go env GOCACHE)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go cache
+        if: steps.cachekeys.outputs.pr == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          version: v2.14.0
+          path: |
+            ${{ steps.cachekeys.outputs.mod }}
+            ${{ steps.cachekeys.outputs.build }}
+          # Never an exact hit (the run id is new): restore-keys picks the newest entry.
+          key: ${{ steps.cachekeys.outputs.base }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cachekeys.outputs.base }}-
+            ${{ steps.cachekeys.outputs.prefix }}
+      # A go install'ed binary, not golangci-lint-action: the action restores its own
+      # cache, which a push must never do. Built with the module's go1.27.4.
+      - name: golangci-lint
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/golangci" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          "$RUNNER_TEMP/golangci/golangci-lint" run ./...
+
+      - name: Save Go cache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ${{ steps.cachekeys.outputs.mod }}
+            ${{ steps.cachekeys.outputs.build }}
+          key: ${{ steps.cachekeys.outputs.base }}-${{ github.run_id }}
