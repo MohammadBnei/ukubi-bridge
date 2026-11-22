@@ -3,6 +3,7 @@ package bus
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -37,6 +38,13 @@ func TestHelmClientTable(t *testing.T) {
 	}
 	if !core.mayRead([]string{"dev.bnei.forge.", "dev.bnei.github."}, nil) {
 		t.Error("bridge-core reads the forge events")
+	}
+	// Core hands an event back to its own thread (PublishEvent): forge/ since
+	// P4.4, github/ kept while a rollback to the GitHub route is possible.
+	for _, sub := range []string{"forge/o/r/pr/1", "github/o/r/pr/1"} {
+		if !slices.ContainsFunc(core.PublishSubjects, func(pre string) bool { return strings.HasPrefix(sub, pre) }) {
+			t.Errorf("bridge-core cannot publish on %s", sub)
+		}
 	}
 	// No rule of core's may reach a human-facing type, on any subject; push's
 	// rules reach only needs_you. Checked on the rule prefixes themselves.

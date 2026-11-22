@@ -92,7 +92,7 @@ env:
       {
         "bridge-core": {"kind": "agent", "privileged": true,
           "publish_types": ["dev.bnei.agent.", "dev.bnei.fleet.session."],
-          "publish_subjects": ["fleet/", "github/", "alert/", "agent/"],
+          "publish_subjects": ["fleet/", "forge/", "github/", "alert/", "agent/"],
           "subscribe": [{"types": ["dev.bnei.github.", "dev.bnei.forge.", "dev.bnei.alert.", "dev.bnei.agent."], "subjects": [""]}]},
         "bridge-game": {"kind": "bot",
           "publish_types": ["dev.bnei.game."], "publish_subjects": ["game/"],
