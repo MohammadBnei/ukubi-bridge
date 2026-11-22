@@ -88,13 +88,13 @@ env:
   - name: BRIDGE_FORGEJO_AGENT_LOGINS
     value: "ukubi-fleet,ukubi-review"
   # The Forgejo relist loop: off while the repo list is empty. Its token is
-  # the optional Secret mounted below (read:repository and read:issue only),
-  # read on every run; until that Secret exists the mount is empty and a
-  # non-empty list logs one error per run.
+  # BRIDGE_FORGEJO_READER_TOKEN from the ukubi-bridge-config Secret (the
+  # restricted bridge-reader bot, read only). The token-file variable is no
+  # longer set here, so an image that predates the env token stays off (one
+  # WARN) instead of erroring on every run; the bridge still honours the file
+  # if set, for one release.
   - name: BRIDGE_FORGEJO_RELIST_REPOS
-    value: ""
-  - name: BRIDGE_FORGEJO_TOKEN_FILE
-    value: /var/run/secrets/forgejo/token
+    value: "mohammadbnei/infra-bootstrap,mohammadbnei/agent-fleet,mohammadbnei/dream-analyst,mohammadbnei/drop,mohammadbnei/editable-blog,mohammadbnei/has-journal,mohammadbnei/hq,mohammadbnei/mountain,mohammadbnei/pi-lab,mohammadbnei/ukubi-bridge,mohammadbnei/ukubi-stt,mohammadbnei/vos-monolith,mohammadbnei/wird,mohammadbnei/ukubi-game,mohammadbnei/ukubi-go,mohammadbnei/ukubi-kit,mohammadbnei/ukubi-ci,mohammadbnei/ukubi-meet"
   # API clients are authentik service accounts (infra-bootstrap ADR-0066):
   # this table holds what each may publish and read, never a secret. Explicit
   # env, so a key of the same name in the envFrom Secret cannot override it.
@@ -234,27 +234,22 @@ resources:
   limits:
     memory: 128Mi
 
-# The relist loop's Forgejo token, from a Secret infra-bootstrap does not
-# render yet: optional, so the pod starts without it.
+# The Infisical operator restarts the pod when ukubi-bridge-config changes, so a
+# rotated BRIDGE_FORGEJO_READER_TOKEN (read once at start) takes effect.
+annotations:
+  secrets.infisical.com/auto-reload: "true"
+
 extraVolumes:
-  - name: forgejo-token
-    secret:
-      secretName: ukubi-bridge-forgejo-token
-      optional: true
-      defaultMode: 0400
   # The event contract (contract/events.yaml, copied byte for byte into the
   # ConfigMap below). A directory mount, no subPath, so an edit reaches the pod
   # without a restart (the bridge re-reads it every minute).
-  # optional, like the token: a missing ConfigMap must not keep the pod in ContainerCreating (the bridge
+  # optional: a missing ConfigMap must not keep the pod in ContainerCreating (the bridge
   # then logs "event contract not loaded" and flags nothing).
   - name: contract
     configMap:
       name: ukubi-bridge-contract
       optional: true
 extraVolumeMounts:
-  - name: forgejo-token
-    mountPath: /var/run/secrets/forgejo
-    readOnly: true
   - name: contract
     mountPath: /etc/bridge/contract
     readOnly: true
@@ -312,6 +307,28 @@ extraManifests:
                 description: >-
                   BRIDGE_FORGEJO_WEBHOOK_SECRET is unset, so /webhook/forgejo answers 404 and no Forgejo
                   event reaches the bus. Check the ukubi-bridge-config Secret and restart the pod.
+            - alert: BridgeForgejoRelistOff
+              expr: >-
+                bridge_flow_enabled{namespace="{{ .Release.Namespace }}", flow="forgejo-relist"} == 0
+                or absent(bridge_flow_enabled{namespace="{{ .Release.Namespace }}", flow="forgejo-relist"})
+              for: 30m
+              labels:
+                severity: notice
+              annotations:
+                summary: "ukubi-bridge: the Forgejo relist loop is off"
+                description: >-
+                  BRIDGE_FORGEJO_RELIST_REPOS is empty or neither BRIDGE_FORGEJO_READER_TOKEN nor the
+                  token file is set, so a missed Forgejo webhook is never relisted. Check the ukubi-bridge-config Secret.
+            - alert: BridgeForgejoRelistErrors
+              expr: increase(bridge_relist_runs_total{namespace="{{ .Release.Namespace }}", result="error"}[1h]) >= 3
+              labels:
+                severity: notice
+              annotations:
+                summary: "ukubi-bridge: the Forgejo relist loop is failing"
+                description: >-
+                  At least 3 relist runs (of 6 an hour) ended in error. The bridge log names each failing
+                  repo and the cause (a repo the bridge-reader bot cannot read, a revoked token, or Forgejo
+                  unreachable). After a token rotation the pod restarts itself (Infisical auto-reload).
     {{- end }}
   - |
     apiVersion: v1

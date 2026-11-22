@@ -225,10 +225,7 @@ Not yet:
 - Forgejo: a route from Forgejo (CT 305, outside the cluster) to
   `/webhook/forgejo`, such as an internal-only IngressRoute locked to the
   Forgejo host; the webhook's registration and Forgejo's `ALLOWED_HOST_LIST`;
-  the relist loop's token Secret (`ukubi-bridge-forgejo-token`, key `token`:
-  the chart mounts it, optional, at `/var/run/secrets/forgejo`, and its repo
-  list is empty) rendered by infra-bootstrap; relisting pushes
-  (synchronized), reopens, label changes and runs.
+  relisting pushes (synchronized), reopens, label changes and runs.
 - System tags: the authentik `bridge-atlas` service account (kind machine,
   the only `tag` client in the chart's table) and atlas itself; until then no
   event is tagged and a System-filtered subscription gaps every event it
@@ -461,7 +458,8 @@ loop for a private key that does not parse).
 | `BRIDGE_FORGEJO_WEBHOOK_SECRET` | The Forgejo webhook's secret. Unset: `/webhook/forgejo` is off (404), logged at WARN. |
 | `BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS` | `BRIDGE_TRUSTED_LOGINS` and `BRIDGE_AGENT_LOGINS` for Forgejo logins, read by `/webhook/forgejo` only. |
 | `BRIDGE_FORGEJO_RELIST_REPOS` | Comma-separated `owner/repo` the Forgejo relist loop watches. Unset or empty: the loop is off. An entry that is not `owner/repo` is skipped with a warning. |
-| `BRIDGE_FORGEJO_TOKEN_FILE` | Path of a mounted file holding a Forgejo token with `read:repository` and `read:issue` only, read on every run (a rotation needs no restart). Without it the relist loop is off, with a warning. |
+| `BRIDGE_FORGEJO_READER_TOKEN` | A Forgejo token with `read:repository` and `read:issue` only (the `bridge-reader` bot), read at start (a rotation needs a pod restart; the chart sets the Infisical auto-reload annotation, so a changed `ukubi-bridge-config` restarts it). Without it and without `BRIDGE_FORGEJO_TOKEN_FILE` the relist loop is off, with a warning. |
+| `BRIDGE_FORGEJO_TOKEN_FILE` | Fallback for the token: path of a mounted file with the same token, read on every run. Used only when `BRIDGE_FORGEJO_READER_TOKEN` is unset; to be removed after one release. |
 | `BRIDGE_TAG_GRACE` | How long a System-filtered stream holds an untagged event for its tag before it gaps it, a Go duration above 0, default `60s`. |
 | `BRIDGE_CONTRACT_FILE` | Path of the event contract (`contract/events.yaml`), read at start and every 60 s; a bad or missing file keeps the last good one, logged at WARN. Unset or never loaded: nothing is flagged (see Event contract). |
 | `BRIDGE_FORGEJO_URL` | Forgejo's base URL for the relist loop, default `https://git.bnei.dev`; every page is fetched from this host. Not `https://`: a warning (the token goes in clear). |

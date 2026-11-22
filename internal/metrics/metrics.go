@@ -46,8 +46,15 @@ func Builtin(name string) bool {
 	return false
 }
 
-// Enable sets the flow's gauge to 1.
-func Enable(flow string) { flowEnabled.WithLabelValues(flow).Set(1) }
+// Enable sets the flow's gauge to 1. The relist flow also creates both its run
+// series at 0, so increase() sees the first error after a start.
+func Enable(flow string) {
+	flowEnabled.WithLabelValues(flow).Set(1)
+	if flow == ForgejoRelist {
+		relistRuns.WithLabelValues("error").Add(0)
+		relistRuns.WithLabelValues("ok").Add(0)
+	}
+}
 
 // SetEnabled sets the flow's gauge to 1 or 0, for a flow that can come back.
 func SetEnabled(flow string, on bool) {

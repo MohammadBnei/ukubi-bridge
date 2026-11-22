@@ -46,8 +46,11 @@ type Relister struct {
 	// TokenFile holds a Forgejo token with read:repository and read:issue
 	// only. It is read on every run, so a rotation needs no restart.
 	TokenFile string
-	Repos     []string // owner/repo
-	Policy    github.Policy
+	// Token, when set, is used instead of TokenFile (from the environment, so
+	// a rotation needs a restart).
+	Token  string
+	Repos  []string // owner/repo
+	Policy github.Policy
 	// MaxAge bounds how far back a run looks, whatever the cursor says: a fact
 	// older than retention may have had its event deleted, and would be new again.
 	MaxAge time.Duration
@@ -118,13 +121,16 @@ var nextPage = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 // Run relists every repo once. A repo that fails keeps its cursor, so its next
 // run covers the same window again; the others go on.
 func (r *Relister) Run(ctx context.Context, now time.Time) (int, error) {
-	raw, err := os.ReadFile(r.TokenFile)
-	if err != nil {
-		metrics.SetEnabled(metrics.ForgejoRelist, false) // the missing token file; Loop logs the error
-		return 0, err
+	token := r.Token
+	if token == "" {
+		raw, err := os.ReadFile(r.TokenFile)
+		if err != nil {
+			metrics.SetEnabled(metrics.ForgejoRelist, false) // the missing token file; Loop logs the error
+			return 0, err
+		}
+		token = strings.TrimSpace(string(raw))
 	}
 	metrics.SetEnabled(metrics.ForgejoRelist, true)
-	token := strings.TrimSpace(string(raw))
 	n := 0
 	var errs []error
 	for _, repo := range r.Repos {

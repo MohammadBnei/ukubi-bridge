@@ -445,6 +445,8 @@ func TestConfigRelist(t *testing.T) {
 	}{
 		{"off", nil, nil, 0},
 		{"no token", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": "a/b"}, nil, 1},
+		{"env token", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": "a/b", "BRIDGE_FORGEJO_READER_TOKEN": " tok\n"},
+			&RelistConfig{URL: "https://git.bnei.dev", Token: "tok", Repos: []string{"a/b"}}, 0},
 		{"token, no repo", map[string]string{"BRIDGE_FORGEJO_TOKEN_FILE": "/t"}, nil, 0},
 		{"on", map[string]string{"BRIDGE_FORGEJO_RELIST_REPOS": " c/d, a/b,,bad, a/b", "BRIDGE_FORGEJO_TOKEN_FILE": "/t"},
 			&RelistConfig{URL: "https://git.bnei.dev", TokenFile: "/t", Repos: []string{"a/b", "c/d"}}, 1},

@@ -116,10 +116,10 @@ func main() {
 		metrics.SetEnabled(metrics.GithubReconcile, false) // reconciler warned
 	}
 	if rc := cfg.Relist; rc == nil {
-		metrics.SetEnabled(metrics.ForgejoRelist, false) // off on purpose (empty list) or warned by config (no token file)
+		metrics.SetEnabled(metrics.ForgejoRelist, false) // off on purpose (empty list) or warned by config (no token, env or file)
 	} else {
 		metrics.Enable(metrics.ForgejoRelist)
-		r := &forgejo.Relister{API: rc.URL, TokenFile: rc.TokenFile, Repos: rc.Repos,
+		r := &forgejo.Relister{API: rc.URL, Token: rc.Token, TokenFile: rc.TokenFile, Repos: rc.Repos,
 			Policy: github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}, MaxAge: cfg.Retention,
 			Insert: st.Insert, Cursor: st.RelistCursor, SetCursor: st.SetRelistCursor, Client: &http.Client{Timeout: 30 * time.Second}}
 		go r.Loop(ctx, 10*time.Minute)

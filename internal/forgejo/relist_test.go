@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,6 +197,27 @@ func TestRelist(t *testing.T) {
 	delete(log.cursors, "mohammadbnei/editable-blog")
 	if n, err := r.Run(context.Background(), now); err != nil || n != 0 {
 		t.Errorf("second run: %d %v", n, err)
+	}
+}
+
+// The env token is sent as is, with no token file to read; it wins over a
+// file that does not exist.
+func TestRelistEnvToken(t *testing.T) {
+	var auth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		auth = append(auth, req.Header.Get("Authorization"))
+		http.Error(w, "stop", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	for _, file := range []string{"", "/nonexistent/token"} {
+		auth = nil
+		log := &fakeLog{cursors: map[string]time.Time{}}
+		r := &Relister{API: srv.URL, Token: "tok", TokenFile: file, Repos: []string{"a/b"}, Policy: policy, MaxAge: time.Hour,
+			Insert: log.insert, Cursor: log.cursor, SetCursor: log.setCursor, Client: srv.Client()}
+		_, err := r.Run(context.Background(), time.Now())
+		if err == nil || strings.Contains(err.Error(), "no such file") || len(auth) == 0 || auth[0] != "token tok" {
+			t.Errorf("file %q: err %v, auth %v", file, err, auth)
+		}
 	}
 }
 

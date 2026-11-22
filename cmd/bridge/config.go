@@ -22,7 +22,7 @@ var envVars = []string{
 	"BRIDGE_GITHUB_APP_ID", "BRIDGE_GITHUB_APP_PRIVATE_KEY", "BRIDGE_RECONCILE_LOOKBACK", "BRIDGE_ALERT_TOKEN",
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
 	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
-	"BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE", "BRIDGE_CONTRACT_FILE",
+	"BRIDGE_FORGEJO_READER_TOKEN", "BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE", "BRIDGE_CONTRACT_FILE",
 	"BRIDGE_METRICS_ADDR",
 }
 
@@ -49,7 +49,7 @@ type Config struct {
 	// The Forgejo logins, apart from the GitHub ones: a name free on one forge
 	// is anyone's to claim there (ADR-0082 §12).
 	ForgejoTrusted, ForgejoAgents map[string]bool
-	Relist                        *RelistConfig // nil: the Forgejo relist loop is off (no repos, or no token file)
+	Relist                        *RelistConfig // nil: the Forgejo relist loop is off (no repos, or no token: env or file)
 
 	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
 	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
@@ -64,7 +64,8 @@ type OIDCConfig struct{ Issuer, ClientID, Cert, JWKSURL string }
 // RelistConfig is what the Forgejo relist loop reads.
 type RelistConfig struct {
 	URL       string   // Forgejo's base URL, default https://git.bnei.dev
-	TokenFile string   // a mounted file holding a read-only token
+	Token     string   // the read-only token from BRIDGE_FORGEJO_READER_TOKEN; wins over TokenFile
+	TokenFile string   // a mounted file holding a read-only token (fallback)
 	Repos     []string // owner/repo, sorted
 }
 
@@ -156,7 +157,7 @@ func load(getenv func(string) string) (Config, *configError) {
 			c.Traces = ""
 		}
 	}
-	repos, tokenFile, forgejoURL := getenv("BRIDGE_FORGEJO_RELIST_REPOS"), getenv("BRIDGE_FORGEJO_TOKEN_FILE"), getenv("BRIDGE_FORGEJO_URL")
+	repos, token, tokenFile, forgejoURL := getenv("BRIDGE_FORGEJO_RELIST_REPOS"), strings.TrimSpace(getenv("BRIDGE_FORGEJO_READER_TOKEN")), getenv("BRIDGE_FORGEJO_TOKEN_FILE"), getenv("BRIDGE_FORGEJO_URL")
 	if forgejoURL == "" {
 		forgejoURL = "https://git.bnei.dev"
 	}
@@ -170,14 +171,14 @@ func load(getenv func(string) string) (Config, *configError) {
 	}
 	switch {
 	case len(watched) == 0:
-	case tokenFile == "":
-		c.warn("BRIDGE_FORGEJO_RELIST_REPOS is set without BRIDGE_FORGEJO_TOKEN_FILE; the Forgejo relist loop is off")
+	case token == "" && tokenFile == "":
+		c.warn("BRIDGE_FORGEJO_RELIST_REPOS is set without BRIDGE_FORGEJO_READER_TOKEN or BRIDGE_FORGEJO_TOKEN_FILE; the Forgejo relist loop is off")
 	default:
 		if !strings.HasPrefix(forgejoURL, "https://") {
 			c.warn("BRIDGE_FORGEJO_URL is not https: the relist loop sends its token in clear", "value", forgejoURL)
 		}
 		slices.Sort(watched)
-		c.Relist = &RelistConfig{URL: strings.TrimSuffix(forgejoURL, "/"), TokenFile: tokenFile, Repos: watched}
+		c.Relist = &RelistConfig{URL: strings.TrimSuffix(forgejoURL, "/"), Token: token, TokenFile: tokenFile, Repos: watched}
 	}
 	appID, pemKey := getenv("BRIDGE_GITHUB_APP_ID"), getenv("BRIDGE_GITHUB_APP_PRIVATE_KEY")
 	if appID == "" || pemKey == "" {
