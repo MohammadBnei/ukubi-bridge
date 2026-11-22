@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -91,18 +92,26 @@ func TestMainTraces(t *testing.T) {
 		t.Skip("BRIDGE_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
+	// A name of its own, so concurrent CI runs share one dev Postgres without dropping each other's database.
+	dbn := fmt.Sprintf("bridge_main_test_%d", time.Now().UnixNano())
 	admin, err := pgx.Connect(ctx, base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{`DROP DATABASE IF EXISTS bridge_main_test WITH (FORCE)`, `CREATE DATABASE bridge_main_test`} {
+	for _, q := range []string{"DROP DATABASE IF EXISTS " + dbn + " WITH (FORCE)", "CREATE DATABASE " + dbn} {
 		if _, err := admin.Exec(ctx, q); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = admin.Close(ctx)
 	u, _ := url.Parse(base)
-	u.Path = "/bridge_main_test"
+	u.Path = "/" + dbn
+	t.Cleanup(func() {
+		if a, err := pgx.Connect(context.Background(), base); err == nil {
+			_, _ = a.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbn+" WITH (FORCE)")
+			_ = a.Close(context.Background())
+		}
+	})
 
 	col := &collector{}
 	otlp := httptest.NewServer(col)

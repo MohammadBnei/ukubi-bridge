@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -19,18 +21,26 @@ func TestOpenUpgradesTrusted(t *testing.T) {
 		t.Skip("BRIDGE_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
+	// A name of its own, so concurrent CI runs share one dev Postgres without dropping each other's database.
+	dbn := fmt.Sprintf("bridge_upgrade_test_%d", time.Now().UnixNano())
 	admin, err := pgx.Connect(ctx, base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{`DROP DATABASE IF EXISTS bridge_upgrade_test WITH (FORCE)`, `CREATE DATABASE bridge_upgrade_test`} {
+	for _, q := range []string{"DROP DATABASE IF EXISTS " + dbn + " WITH (FORCE)", "CREATE DATABASE " + dbn} {
 		if _, err := admin.Exec(ctx, q); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = admin.Close(ctx)
 	u, _ := url.Parse(base)
-	u.Path = "/bridge_upgrade_test"
+	u.Path = "/" + dbn
+	t.Cleanup(func() {
+		if a, err := pgx.Connect(context.Background(), base); err == nil {
+			_, _ = a.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbn+" WITH (FORCE)")
+			_ = a.Close(context.Background())
+		}
+	})
 
 	db, err := pgx.Connect(ctx, u.String())
 	if err != nil {
