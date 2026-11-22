@@ -448,8 +448,33 @@ loop for a private key that does not parse).
 | `BRIDGE_ALERT_TOKEN` | Bearer token Alertmanager and Grafana send. Unset: both alert endpoints answer 503. |
 | `BRIDGE_RETENTION` | Go duration, default `720h` (30 days), at least `24h`. Keep it longer than `BRIDGE_RECONCILE_LOOKBACK` and than the longest consumer outage you accept. |
 | `PORT` | Default `8080`. |
+| `BRIDGE_METRICS_ADDR` | Where `/metrics` is served, on its own listener (never the public port), default `:9090`. |
 | `BRIDGE_CLIENTS` | Retired (ADR-0066): ignored, with a warning at start, until the rollout drops it from the Secret. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional. The OTLP/HTTP traces URL in full (`…/v1/traces`): a span per API call and webhook route. Unset: no tracing. The SDK still reads its other `OTEL_*` variables (the exporter's headers, timeout, compression and certificates, `OTEL_BSP_*`, span limits, resource attributes); the endpoint and the service name (`ukubi-bridge`) are set in code and win. `OTEL_EXPORTER_OTLP_ENDPOINT` alone turns nothing on. A failed export logs `traces` at WARN. |
+
+## Metrics
+
+`/metrics` is served on its own listener, `BRIDGE_METRICS_ADDR` (default `:9090`), never on the public port; the chart's
+Service and ServiceMonitor carry it as the `metrics` port. A flow is one of `forgejo-webhook`, `forgejo-relist`,
+`github-webhook`, `github-reconcile`, `alertmanager`, `grafana`, `oidc-jwks` (the hourly certificate check), or an API
+client's name (its `Publish`, e.g. `bridge-kwatch`). A flow that is switched off by missing configuration reads 0 on `bridge_flow_enabled` (most log one WARN naming the setting;
+the API client flows read 0 while no signing certificate is pinned). `oidc-jwks` and `github-reconcile` only report
+enabled: their runs and failures log, they record no event series.
+
+| Series | Meaning |
+|---|---|
+| `bridge_flow_enabled{flow}` | 1 if the flow is on, 0 if its setting is missing or unusable. |
+| `bridge_flow_last_event_timestamp{flow}` | Unix seconds of the last event accepted on the flow (absent until the first one since start). |
+| `bridge_flow_events_total{flow,type_prefix}` | Events accepted (webhooks, alert endpoints and `Publish` count redeliveries too; relist counts only inserted events), by the type up to its third dot (`dev.bnei.forge`). |
+| `bridge_relist_runs_total{result}` | Forgejo relist runs, `ok` or `error`. |
+| `bridge_tags_written_total` | Tags stored through `Tag`. |
+
+Alerts (`helm/values.yaml`, severity notice): `BridgeForgejoWebhookOff` (the Forgejo secret is unset, or the series is
+missing: no Forgejo event arrives). They ship with the ServiceMonitor, which stays `enabled: false` until the pinned image
+serves `:9090`: scraping an older image is connection refused, and the chart's TargetDown is a warning that Alertmanager
+routes to thot. A down or unscraped bridge lands there once it is on. kwatch liveness has no alert yet: it publishes only on
+changes, so silence on a calm cluster is normal; it waits for kwatch's own series. `bridge_type_uncontracted_total` is not
+shipped yet.
 
 ## Tests
 

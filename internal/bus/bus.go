@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 	bridgev1 "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1"
 	"github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1/bridgev1connect"
@@ -100,6 +101,10 @@ func ParseClients(js string) (map[string]Client, error) {
 		}
 		if err := typePrefixes(c.PublishTypes); err != nil {
 			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_types: %w", name, err)
+		}
+		// A client named like a built-in flow would merge its series into that flow.
+		if len(c.PublishTypes) > 0 && metrics.Builtin(name) {
+			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s is a built-in flow name", name)
 		}
 		if err := subjectPrefixes(c.PublishSubjects); err != nil {
 			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: publish_subjects: %w", name, err)
@@ -354,6 +359,7 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 	if err != nil {
 		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
+	metrics.Event(c.Name, e.Type)
 	return connect.NewResponse(&bridgev1.PublishResponse{Duplicate: !inserted}), nil
 }
 
@@ -721,6 +727,7 @@ func (s *Server) Tag(ctx context.Context, req *connect.Request[bridgev1.TagReque
 	case err != nil:
 		return nil, sourced(connect.CodeUnavailable, keyStore, sourceStore, err)
 	}
+	metrics.TagsWritten.Add(float64(len(tags)))
 	return connect.NewResponse(&bridgev1.TagResponse{}), nil
 }
 

@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/MohammadBnei/ukubi-go/telemetry"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/forgejo"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
 
@@ -57,6 +59,7 @@ func main() {
 	if !tokens.Pinned() {
 		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
 	}
+	clientFlows(clients, tokens.Pinned())
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("open store", "err", err)
@@ -75,29 +78,58 @@ func main() {
 	}
 	route := func(pattern string, h http.Handler) { mux.Handle(pattern, tel.Handler(pattern, h)) }
 	route("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
+	metrics.Enable(metrics.GithubWebhook)
 	forgejoRoute(route, st, cfg)
 	bus.TagGrace = cfg.TagGrace
 	api := bus.New(st, clients, tokens)
 	mux.Handle(api.Handler(tel.Interceptors()...))
 
 	// Unset token: both answer 503 rather than serve open.
+	if cfg.AlertToken == "" {
+		metrics.Disable(metrics.Alertmanager, "BRIDGE_ALERT_TOKEN is unset: the alert endpoints answer 503")
+		metrics.SetEnabled(metrics.Grafana, false)
+	} else {
+		metrics.Enable(metrics.Alertmanager)
+		metrics.Enable(metrics.Grafana)
+	}
 	route("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.Insert))
 	route("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.Insert))
 
-	if cfg.OIDC.JWKSURL != "" {
+	switch {
+	case cfg.OIDC.JWKSURL == "":
+		metrics.Disable(metrics.OIDCJWKS, "BRIDGE_OIDC_JWKS_URL is unset: the certificate rotation check is off")
+	case !tokens.Pinned():
+		metrics.SetEnabled(metrics.OIDCJWKS, false) // warned above: no certificate pinned
+	default:
+		metrics.Enable(metrics.OIDCJWKS)
 		go tokens.Watch(ctx, cfg.OIDC.JWKSURL, &http.Client{Timeout: 10 * time.Second}, time.Hour)
 	}
 	go retain(ctx, api, st, cfg.Retention, time.Hour)
 
 	if r := reconciler(st, cfg.App); r != nil {
+		metrics.Enable(metrics.GithubReconcile)
 		go r.Loop(ctx, 10*time.Minute)
+	} else {
+		metrics.SetEnabled(metrics.GithubReconcile, false) // reconciler warned
 	}
-	if rc := cfg.Relist; rc != nil {
+	if rc := cfg.Relist; rc == nil {
+		metrics.SetEnabled(metrics.ForgejoRelist, false) // off on purpose (empty list) or warned by config (no token file)
+	} else {
+		metrics.Enable(metrics.ForgejoRelist)
 		r := &forgejo.Relister{API: rc.URL, TokenFile: rc.TokenFile, Repos: rc.Repos,
 			Policy: github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}, MaxAge: cfg.Retention,
 			Insert: st.Insert, Cursor: st.RelistCursor, SetCursor: st.SetRelistCursor, Client: &http.Client{Timeout: 30 * time.Second}}
 		go r.Loop(ctx, 10*time.Minute)
 	}
+
+	// /metrics on its own listener: the public port is exposed through ingress.
+	msrv := &http.Server{Addr: cfg.MetricsAddr, Handler: promhttp.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		if err := msrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics listener", "addr", cfg.MetricsAddr, "err", err)
+		}
+	}()
+	go func() { <-ctx.Done(); _ = msrv.Close() }()
 
 	port := cfg.Port
 	// No WriteTimeout: Subscribe streams are long-lived. h2c so gRPC clients work
@@ -133,6 +165,15 @@ func main() {
 	}
 	if err := tel.Shutdown(); err != nil {
 		slog.Warn("traces", "err", err)
+	}
+}
+
+// clientFlows sets the gauge of every API client that publishes: on only while the API can verify a token.
+func clientFlows(clients map[string]bus.Client, pinned bool) {
+	for name, c := range clients {
+		if len(c.PublishTypes) > 0 {
+			metrics.SetEnabled(name, pinned)
+		}
 	}
 }
 
@@ -230,6 +271,7 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		metrics.Event(metrics.GithubWebhook, e.Type)
 		slog.Info("github: event", "type", e.Type, "subject", e.Subject, "actorTrusted", e.ActorTrusted, "threadOwned", e.ThreadOwned, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})
@@ -241,8 +283,10 @@ func githubHandler(st *store.Store, policy github.Policy, secret []byte) http.Ha
 func forgejoRoute(route func(string, http.Handler), st *store.Store, cfg Config) {
 	if cfg.ForgejoSecret == "" {
 		slog.Warn("forgejo webhook off: BRIDGE_FORGEJO_WEBHOOK_SECRET is unset")
+		metrics.SetEnabled(metrics.ForgejoWebhook, false)
 		return
 	}
+	metrics.Enable(metrics.ForgejoWebhook)
 	policy := github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}
 	route("POST /webhook/forgejo", forgejoHandler(st, policy, []byte(cfg.ForgejoSecret)))
 }
@@ -285,6 +329,7 @@ func forgejoHandler(st *store.Store, policy github.Policy, secret []byte) http.H
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		metrics.Event(metrics.ForgejoWebhook, e.Type)
 		slog.Info("forgejo: event", "type", e.Type, "subject", e.Subject, "actorTrusted", e.ActorTrusted, "threadOwned", e.ThreadOwned, "new", inserted)
 		w.WriteHeader(http.StatusAccepted)
 	})

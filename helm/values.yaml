@@ -21,6 +21,20 @@ image:
 
 service:
   port: 8080
+  # /metrics on its own port (BRIDGE_METRICS_ADDR, default :9090), never on the
+  # public port above: the ingress reaches only that one.
+  extraPorts:
+    - name: metrics
+      port: 9090
+
+# ROLLOUT ORDER: values reach ArgoCD before ukubi-ci moves the image pin, and an
+# image without :9090 would be scraped into connection refused (TargetDown, a
+# warning routed to thot). Keep this false until the pinned image serves
+# /metrics, then set it true in a follow-up. It gates the PrometheusRule too.
+metrics:
+  serviceMonitor:
+    enabled: false
+    port: metrics
 
 # Public on ONE path. The chart's IngressRoute matches
 # Host(events.bnei.dev) && PathPrefix(/webhook/github), so /healthz,
@@ -233,3 +247,32 @@ extraManifests:
       ipAllowList:
         sourceRange:
           - 192.168.1.214/32
+  # Flow health (README "Metrics"). Only flows live in production: the relist
+  # and alert endpoints add theirs when they are switched on, GitHub is retired.
+  # No {{ $labels }} in annotations: extraManifests go through Helm tpl.
+  - |
+    {{- if .Values.metrics.serviceMonitor.enabled }}
+    apiVersion: monitoring.coreos.com/v1
+    kind: PrometheusRule
+    metadata:
+      name: ukubi-bridge-flows
+      namespace: {{ .Release.Namespace }}
+      labels:
+        {{- include "common-app-chart.labels" . | nindent 8 }}
+    spec:
+      groups:
+        - name: ukubi-bridge-flows
+          rules:
+            - alert: BridgeForgejoWebhookOff
+              expr: >-
+                bridge_flow_enabled{namespace="{{ .Release.Namespace }}", flow="forgejo-webhook"} == 0
+                or absent(bridge_flow_enabled{namespace="{{ .Release.Namespace }}", flow="forgejo-webhook"})
+              for: 5m
+              labels:
+                severity: notice
+              annotations:
+                summary: "ukubi-bridge: the Forgejo webhook is off"
+                description: >-
+                  BRIDGE_FORGEJO_WEBHOOK_SECRET is unset, so /webhook/forgejo answers 404 and no Forgejo
+                  event reaches the bus. Check the ukubi-bridge-config Secret and restart the pod.
+    {{- end }}

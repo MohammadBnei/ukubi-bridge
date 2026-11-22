@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 )
 
 // errSkip marks an alert that can't become an event (no dedup key, unknown status).
@@ -91,6 +92,7 @@ func Handler(source, token string, insert func(context.Context, event.Event) (bo
 				http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 				return
 			}
+			metrics.Event(source, e.Type)
 			slog.Info(source+": event", "type", e.Type, "subject", e.Subject, "new", inserted)
 		}
 		w.WriteHeader(http.StatusAccepted)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 )
 
 // Relisting is how a Forgejo delivery lost to bridge downtime or a 503 comes
@@ -119,8 +120,10 @@ var nextPage = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 func (r *Relister) Run(ctx context.Context, now time.Time) (int, error) {
 	raw, err := os.ReadFile(r.TokenFile)
 	if err != nil {
+		metrics.SetEnabled(metrics.ForgejoRelist, false) // the missing token file; Loop logs the error
 		return 0, err
 	}
+	metrics.SetEnabled(metrics.ForgejoRelist, true)
 	token := strings.TrimSpace(string(raw))
 	n := 0
 	var errs []error
@@ -287,6 +290,7 @@ func (r *Relister) relist(ctx context.Context, token, repo string, now time.Time
 			return n, err
 		}
 		if inserted {
+			metrics.Event(metrics.ForgejoRelist, e.Type)
 			slog.Info("forgejo relist: event", "type", e.Type, "subject", e.Subject, "id", e.ID)
 			n++
 		}
@@ -362,6 +366,7 @@ func (r *Relister) Loop(ctx context.Context, interval time.Duration) {
 	defer t.Stop()
 	for {
 		n, err := r.Run(ctx, time.Now())
+		metrics.RelistRun(err)
 		if err != nil {
 			slog.Error("forgejo relist", "inserted", n, "err", err)
 		} else if n > 0 {

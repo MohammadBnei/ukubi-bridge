@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -22,6 +23,7 @@ var envVars = []string{
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
 	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
 	"BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE",
+	"BRIDGE_METRICS_ADDR",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
@@ -39,6 +41,7 @@ type Config struct {
 	Retention       time.Duration
 	TagGrace        time.Duration // how long a System-filtered stream waits for an event's tag (bus.TagGrace)
 	Port            string
+	MetricsAddr     string     // BRIDGE_METRICS_ADDR: where /metrics is served, apart from the public port
 	Traces          string     // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, the OTLP/HTTP traces URL in full; "" = no tracing
 	App             *AppConfig // nil: the reconcile loop is off (no App id or no key, or a key that does not parse)
 
@@ -129,6 +132,13 @@ func load(getenv func(string) string) (Config, *configError) {
 	}
 	if c.Port == "" {
 		c.Port = "8080"
+	}
+	if c.MetricsAddr = getenv("BRIDGE_METRICS_ADDR"); c.MetricsAddr == "" {
+		c.MetricsAddr = ":9090"
+	}
+	if _, p, err := net.SplitHostPort(c.MetricsAddr); err != nil || p == "" || p == c.Port {
+		c.warn("BRIDGE_METRICS_ADDR is not host:port on a port other than PORT; using the default", "value", c.MetricsAddr)
+		c.MetricsAddr = ":9090"
 	}
 	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
 		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {

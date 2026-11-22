@@ -18,8 +18,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/bus"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
 
@@ -108,6 +111,13 @@ func TestForgejoRouteOff(t *testing.T) {
 	for secret, want := range map[string]int{"": http.StatusNotFound, "s": http.StatusUnauthorized} {
 		mux := http.NewServeMux()
 		forgejoRoute(func(p string, h http.Handler) { mux.Handle(p, h) }, nil, Config{ForgejoSecret: secret})
+		on := 0.0
+		if secret != "" {
+			on = 1
+		}
+		if got := testutil.ToFloat64(metrics.EnabledFor(metrics.ForgejoWebhook)); got != on {
+			t.Errorf("secret %q: bridge_flow_enabled %v, want %v", secret, got, on)
+		}
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, forgejoPost(nil, "push", "d", "{}", "-"))
 		if w.Code != want {
@@ -219,5 +229,20 @@ func TestMainWarnings(t *testing.T) {
 	lines = run("BRIDGE_RETENTION=nope")
 	if !find(lines, "ERROR", "BRIDGE_GITHUB_WEBHOOK_SECRET is required") || find(lines, "ERROR", "open store") {
 		t.Errorf("a missing secret: %v", lines)
+	}
+}
+
+// A client's flow is on only while the API can verify tokens (no pinned certificate: every call is refused).
+func TestClientFlows(t *testing.T) {
+	clients := map[string]bus.Client{"t-pub": {PublishTypes: []string{"dev.bnei.x."}}, "t-sub": {}}
+	for _, pinned := range []bool{true, false} {
+		clientFlows(clients, pinned)
+		want := 0.0
+		if pinned {
+			want = 1
+		}
+		if got := testutil.ToFloat64(metrics.EnabledFor("t-pub")); got != want {
+			t.Errorf("pinned %v: bridge_flow_enabled %v, want %v", pinned, got, want)
+		}
 	}
 }

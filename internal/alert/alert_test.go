@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 )
 
 // Trimmed real Alertmanager v4 webhook body.
@@ -120,5 +123,21 @@ func TestStoreDownIs503(t *testing.T) {
 	log := &fakeLog{err: errors.New("pg down")}
 	if code := post(Handler("alertmanager", "tok", log.insert), "Bearer tok", amFiring); code != http.StatusServiceUnavailable {
 		t.Fatalf("got %d, want 503 so Alertmanager retries", code)
+	}
+}
+
+// An accepted alert counts on its flow, under the type's prefix.
+func TestHandlerCountsEvents(t *testing.T) {
+	h := Handler("alertmanager", "tok", func(context.Context, event.Event) (bool, error) { return true, nil })
+	body := `{"alerts":[{"status":"firing","fingerprint":"f","startsAt":"2026-01-01T00:00:00Z"}]}`
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status %d", w.Code)
+	}
+	if got := testutil.ToFloat64(metrics.EventsFor("alertmanager", "dev.bnei.alert.firing")); got < 1 {
+		t.Errorf("events_total %v, want at least 1", got)
 	}
 }
