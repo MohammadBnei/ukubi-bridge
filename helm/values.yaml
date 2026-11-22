@@ -168,6 +168,32 @@ env:
   # Compared with the pinned certificate hourly; a mismatch only logs.
   - name: BRIDGE_OIDC_JWKS_URL
     value: "http://platform-authentik-server.authentik.svc.cluster.local/application/o/ukubi-bridge-api/jwks/"
+  # Pod identity (plan M3): projected service account tokens, iss
+  # https://192.168.1.211:6443, aud ukubi-bridge, verified against this pinned
+  # cluster key (the Talos cluster's, kid M6S66zib..., from /openid/v1/jwks,
+  # 2026-11-22). A client row is matched by its "sa" field; none has one yet.
+  # An image that predates it ignores both variables. After a cluster rebuild,
+  # re-pin it from `kubectl get --raw /openid/v1/jwks` (the check below warns).
+  - name: BRIDGE_K8S_SA_KEY
+    value: |
+      -----BEGIN PUBLIC KEY-----
+      MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAsEqpSgG05qTA2vfb0MOK
+      6MT8I0kRo1EzPbWt/Fs/CY3EXnelXlcrAF7Bim04CRNZgCYF414EkxDu/qGwpAMf
+      HZNmBrRpdqU+Qner2tT9uTNAH+SCFV7vMqQugHhI1wE6Dlpz4UE5YHRDeCOupv3e
+      8CIhyyG20gf9FhyJjgdO1nhSGfKVN9rtBn08qDIm3gOWWtC9oL9HwLSXTUgXX3oY
+      9f110zg57fQMH3ofGGPhBS2gAwgszLf6WA9qqrGfbSw1aMVRQ6Jh0UxU6tyAOkLY
+      saeSQfD8Ck4YAhXtxcJZ0skxoZBrzkr3+uXhjPgeF8oQ37Pnbp9xUmLajNjpeHiI
+      PgNe7L1g5cdXVcwyIZ00yKXLhOFVNR2u3u03yCWU24THWgpBGU0YnXDLOXXav6bB
+      KNsQIZ/J4lwzqRDnY3sKiyNatG2xk/NQRZpAwYGUqJ2BSHPeipfD0BgJ5a+1Gc39
+      HStL4PrRfGv0xss42kxdpJoMvP08rAurRrhpLbUjtcSvl7eq/BlkoA3p36wMz3Cd
+      yAxLzeSj51y3gvsrrtuPEX6Kof20Yf+PTWGEZ2mn+lD2SK15L43F3AXcV24VIY4t
+      PVDlG9rS85tKrDlm6IIM3jUghtpTNC4UFbvKuNs09aAVeBAkNbOJDidgyTGclYnn
+      LxWLqyoXGC28DzvQX5aC9W8CAwEAAQ==
+      -----END PUBLIC KEY-----
+  # Compared with the pinned key hourly, with the pod's own token and the
+  # in-cluster CA; a mismatch only logs.
+  - name: BRIDGE_K8S_JWKS_URL
+    value: "https://kubernetes.default.svc/openid/v1/jwks"
   # The event contract: a type missing from it is delivered flagged uncontracted.
   # An image that predates it ignores this variable and the mount.
   - name: BRIDGE_CONTRACT_FILE

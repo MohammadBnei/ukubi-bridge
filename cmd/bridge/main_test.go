@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -218,7 +219,7 @@ func TestMainWarnings(t *testing.T) {
 		return false
 	}
 	lines := run("BRIDGE_GITHUB_WEBHOOK_SECRET=s", "BRIDGE_RETENTION=nope", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=nope")
-	for _, prefix := range []string{"BRIDGE_RETENTION must be", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not"} {
+	for _, prefix := range []string{"BRIDGE_RETENTION must be", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not", "flow off: BRIDGE_K8S_SA_KEY is unset"} {
 		if !find(lines, "WARN", prefix) {
 			t.Errorf("no WARN line %q: %v", prefix, lines)
 		}
@@ -226,23 +227,75 @@ func TestMainWarnings(t *testing.T) {
 	if !find(lines, "ERROR", "open store") {
 		t.Errorf("the start did not go on to the store: %v", lines)
 	}
+	// A cluster key that does not parse is a trust input: refused, closed, before the store.
+	lines = run("BRIDGE_GITHUB_WEBHOOK_SECRET=s", "BRIDGE_K8S_SA_KEY=not a key")
+	if !find(lines, "ERROR", "k8s sa") || find(lines, "ERROR", "open store") {
+		t.Errorf("a bad cluster key: %v", lines)
+	}
 	lines = run("BRIDGE_RETENTION=nope")
 	if !find(lines, "ERROR", "BRIDGE_GITHUB_WEBHOOK_SECRET is required") || find(lines, "ERROR", "open store") {
 		t.Errorf("a missing secret: %v", lines)
 	}
 }
 
-// A client's flow is on only while the API can verify tokens (no pinned certificate: every call is refused).
+// A client's flow is on only while the API can verify one of its tokens: authentik's for any row, the cluster's for
+// a row with an sa.
 func TestClientFlows(t *testing.T) {
-	clients := map[string]bus.Client{"t-pub": {PublishTypes: []string{"dev.bnei.x."}}, "t-sub": {}}
-	for _, pinned := range []bool{true, false} {
-		clientFlows(clients, pinned)
-		want := 0.0
-		if pinned {
-			want = 1
+	clients := map[string]bus.Client{"t-pub": {PublishTypes: []string{"dev.bnei.x."}}, "t-sa": {PublishTypes: []string{"dev.bnei.x."}, SA: "ns:x"},
+		"t-sub": {}}
+	for _, c := range []struct {
+		oidc, sa    bool
+		pub, withSA float64
+	}{{true, false, 1, 1}, {false, false, 0, 0}, {false, true, 0, 1}, {true, true, 1, 1}} {
+		clientFlows(clients, c.oidc, c.sa)
+		if got, got2 := testutil.ToFloat64(metrics.EnabledFor("t-pub")), testutil.ToFloat64(metrics.EnabledFor("t-sa")); got != c.pub || got2 != c.withSA {
+			t.Errorf("oidc %v sa %v: t-pub %v t-sa %v, want %v %v", c.oidc, c.sa, got, got2, c.pub, c.withSA)
 		}
-		if got := testutil.ToFloat64(metrics.EnabledFor("t-pub")); got != want {
-			t.Errorf("pinned %v: bridge_flow_enabled %v, want %v", pinned, got, want)
+	}
+}
+
+// TestInCluster: the JWKS client trusts the given CA and sends the token file's current contents as its bearer.
+func TestInCluster(t *testing.T) {
+	var got []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		if r.URL.Path == "/moved" {
+			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(dir+"/ca.crt", ca, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := inCluster(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{"one\n", "two"} {
+		if err := os.WriteFile(dir+"/token", []byte(tok), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res, err := c.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+	}
+	if strings.Join(got, ",") != "Bearer one,Bearer two" {
+		t.Errorf("bearers %v", got)
+	}
+	// A redirect is not followed: the token goes to the URL that was set, nowhere else.
+	res, err := c.Get(srv.URL + "/moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusFound || len(got) != 3 {
+		t.Errorf("redirect: status %d, %d requests", res.StatusCode, len(got))
+	}
+	if _, err := inCluster(t.TempDir()); err == nil {
+		t.Error("no CA file: a client anyway")
 	}
 }

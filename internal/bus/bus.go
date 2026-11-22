@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
 	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
@@ -48,7 +50,10 @@ const (
 // Client is one BRIDGE_API_CLIENTS entry, keyed by its authentik username
 // (infra-bootstrap ADR-0066 §1). It holds permissions only, no secret.
 type Client struct {
-	Name         string   `json:"-"`
+	Name string `json:"-"`
+	// SA is "<namespace>:<serviceaccount>": a projected service account token
+	// of that account signs in as this row (plan M3). One row per account.
+	SA           string   `json:"sa"`
 	Kind         string   `json:"kind"`          // actor stamped on its events; default machine
 	PublishTypes []string `json:"publish_types"` // type prefixes it may publish
 	// Subject prefixes it may publish on; "" allows any. Keeps an app off
@@ -71,6 +76,11 @@ type Rule struct {
 // PrivilegedClient is the only client that may be privileged: agent-fleet core.
 const PrivilegedClient = "bridge-core"
 
+// PrivilegedSA is the only sa the privileged row may have: core's own account (plan M3). The bridge cannot tell who
+// may run a pod as it; that is B2's admission policy, which refuses provisioner pods on it. Set it only once that
+// policy is live.
+const PrivilegedSA = "agent-fleet:bridge-core"
+
 // ParseClients reads BRIDGE_API_CLIENTS: {"<username>": {kind, publish_types, publish_subjects, subscribe, privileged, tag}}.
 func ParseClients(js string) (map[string]Client, error) {
 	clients := map[string]Client{}
@@ -87,7 +97,24 @@ func ParseClients(js string) (map[string]Client, error) {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return nil, errors.New("BRIDGE_API_CLIENTS: data after the client table")
 	}
+	bySA := map[string]string{}
 	for name, c := range clients {
+		if c.SA != "" {
+			if !saName.MatchString(c.SA) {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: sa %q is not <namespace>:<serviceaccount>", name, c.SA)
+			}
+			// default is every pod's account unless it names one: shared, so it proves nothing.
+			if strings.HasSuffix(c.SA, ":default") {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: sa %q is a namespace's shared default account", name, c.SA)
+			}
+			if c.Privileged && c.SA != PrivilegedSA {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s: a privileged row's sa must be %s", name, PrivilegedSA)
+			}
+			if other, dup := bySA[c.SA]; dup {
+				return nil, fmt.Errorf("BRIDGE_API_CLIENTS: %s and %s share sa %q", min(name, other), max(name, other), c.SA)
+			}
+			bySA[c.SA] = name
+		}
 		if name == "" || strings.Contains(name, "/") {
 			return nil, fmt.Errorf("BRIDGE_API_CLIENTS: bad client name %q", name)
 		}
@@ -126,6 +153,10 @@ func ParseClients(js string) (map[string]Client, error) {
 	}
 	return clients, nil
 }
+
+// saName is a namespace (DNS label) and a service account name (DNS subdomain).
+// ponytail: shape only, no length caps; Kubernetes never issues a longer one.
+var saName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?:[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
 // typePrefixes: written with their final dot, so a name never matches a
 // longer one by accident (dev.bnei.game. is not dev.bnei.gamex).
@@ -189,15 +220,15 @@ func validActor(a string) bool {
 	return slices.Contains([]string{event.ActorHuman, event.ActorBot, event.ActorAgent, event.ActorMachine}, a)
 }
 
-// Verifier checks a bearer token and returns its subject and expiry
-// (auth.Verifier in production).
+// Verifier checks a bearer token and returns who it names (auth.Tokens in production).
 type Verifier interface {
-	Verify(raw string) (sub string, exp time.Time, err error)
+	Verify(raw string) (auth.Identity, error)
 }
 
 type Server struct {
 	st      *store.Store
 	clients map[string]Client
+	bySA    map[string]string // "<ns>:<sa>" -> client name; ParseClients keeps it one to one
 	tokens  Verifier
 
 	mu      sync.Mutex
@@ -218,7 +249,13 @@ type outcome struct {
 }
 
 func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
-	return &Server{st: st, clients: clients, tokens: tokens, live: map[string]*stream{}, sentGap: map[string]int64{}}
+	bySA := map[string]string{}
+	for name, c := range clients {
+		if c.SA != "" {
+			bySA[c.SA] = name
+		}
+	}
+	return &Server{st: st, clients: clients, bySA: bySA, tokens: tokens, live: map[string]*stream{}, sentGap: map[string]int64{}}
 }
 
 // Handler mounts the service on a mux, with ics inside the key fallback (standard §6: the fallback is outermost, so
@@ -240,32 +277,45 @@ var (
 // token lifetime).
 var errExpired = errors.New("token expired")
 
-func (s *Server) auth(h http.Header) (Client, time.Time, error) {
+// auth signs the caller in: an authentik token names its row by username, a
+// service account token by the row's sa. Every refusal is counted by its key.
+func (s *Server) auth(h http.Header) (Client, auth.Identity, error) {
 	tok, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || tok == "" {
-		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyBearer, errors.New("bearer token required"))
+		metrics.AuthRefused(string(keyBearer))
+		return Client{}, auth.Identity{}, keyed(connect.CodeUnauthenticated, keyBearer, errors.New("bearer token required"))
 	}
-	sub, exp, err := s.tokens.Verify(tok)
+	id, err := s.tokens.Verify(tok)
 	if err != nil {
-		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, tokenKey(err), err)
+		metrics.AuthRefused(string(tokenKey(err)))
+		return Client{}, auth.Identity{}, keyed(connect.CodeUnauthenticated, tokenKey(err), err)
 	}
-	c, ok := s.clients[sub]
+	name := id.Subject
+	if id.ServiceAccount != "" {
+		sa := id.Namespace + ":" + id.ServiceAccount
+		if name, ok = s.bySA[sa]; !ok {
+			metrics.AuthRefused(string(keyNotSAClient))
+			return Client{}, auth.Identity{}, keyed(connect.CodeUnauthenticated, keyNotSAClient, fmt.Errorf("service account %s is not a bridge client", sa))
+		}
+	}
+	c, ok := s.clients[name]
 	if !ok {
-		return Client{}, time.Time{}, keyed(connect.CodeUnauthenticated, keyNotClient, fmt.Errorf("%s is not a bridge client", sub))
+		metrics.AuthRefused(string(keyNotClient))
+		return Client{}, auth.Identity{}, keyed(connect.CodeUnauthenticated, keyNotClient, fmt.Errorf("%s is not a bridge client", name))
 	}
-	return c, exp, nil
+	return c, id, nil
 }
 
 // owns: a client subscribes as itself or under "<name>/...".
 func (s *Server) owns(h http.Header, sub string) (Client, time.Time, error) {
-	c, exp, err := s.auth(h)
+	c, id, err := s.auth(h)
 	if err != nil {
-		return c, exp, err
+		return c, id.Expiry, err
 	}
 	if len(c.Subscribe) == 0 || (sub != c.Name && !strings.HasPrefix(sub, c.Name+"/")) {
-		return c, exp, keyed(connect.CodePermissionDenied, keyNotOwned, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
+		return c, id.Expiry, keyed(connect.CodePermissionDenied, keyNotOwned, fmt.Errorf("%s may not use subscription %q", c.Name, sub))
 	}
-	return c, exp, nil
+	return c, id.Expiry, nil
 }
 
 // MinStreamLife: a token with less left cannot open a stream, which would
@@ -305,7 +355,7 @@ func unavailable(ctx context.Context, err error) error {
 }
 
 func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.PublishRequest]) (*connect.Response[bridgev1.PublishResponse], error) {
-	c, _, err := s.auth(req.Header())
+	c, id, err := s.auth(req.Header())
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +390,9 @@ func (s *Server) Publish(ctx context.Context, req *connect.Request[bridgev1.Publ
 		Owner: p.GetOwner(),
 		Hops:  int(p.GetHops()), CausationID: p.GetCausationId(),
 		Producer: event.Producer("client", c.Name),
+	}
+	if id.Pod != "" {
+		e.Producer = event.PodProducer(c.Name, id.Namespace, id.ServiceAccount, id.Pod)
 	}
 	if p.GetTime() != nil {
 		e.Time = p.GetTime().AsTime()

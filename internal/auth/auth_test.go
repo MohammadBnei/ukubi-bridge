@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,9 @@ func TestNoCertRefusesAll(t *testing.T) {
 	if err != nil || v.Pinned() {
 		t.Fatal(err)
 	}
+	if b, err := New("", "", " \n\n"); err != nil || b.Pinned() { // a helm block left empty is unset
+		t.Fatalf("blank certificate: %v", err)
+	}
 	if _, err := New(iss, aud, `-----BEGIN CERTIFICATE-----\nMIIB...`); err == nil {
 		t.Fatal("a set certificate with no PEM block was accepted as none")
 	}
@@ -149,17 +153,37 @@ func TestRotationPinsTwo(t *testing.T) {
 func TestCompare(t *testing.T) {
 	pinned, other := key(t), key(t)
 	v, _ := New(iss, aud, certPEM(t, pinned))
-	publish := &pinned.PublicKey
+	publish := []*rsa.PublicKey{&pinned.PublicKey}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: publish, Algorithm: "RS256", Use: "sig"}}})
+		var set jose.JSONWebKeySet
+		for i, k := range publish {
+			set.Keys = append(set.Keys, jose.JSONWebKey{Key: k, KeyID: fmt.Sprint("kid", i), Algorithm: "RS256", Use: "sig"})
+		}
+		_ = json.NewEncoder(w).Encode(set)
 	}))
 	defer srv.Close()
-	if err := v.compare(context.Background(), srv.URL, srv.Client()); err != nil {
+	check := func(all bool) error {
+		return compare(context.Background(), srv.URL, srv.Client(), v.keys, "BRIDGE_OIDC_CERT", all)
+	}
+	if err := check(false); err != nil {
 		t.Fatalf("pinned key published: %v", err)
 	}
-	publish = &other.PublicKey
-	if err := v.compare(context.Background(), srv.URL, srv.Client()); err == nil {
-		t.Fatal("a rotation went unnoticed")
+	if err := check(true); err != nil {
+		t.Fatalf("pinned key published, all: %v", err)
+	}
+	// A cluster rotation: the new key beside the pinned one, already signing. Only all sees it, by kid.
+	publish = []*rsa.PublicKey{&pinned.PublicKey, &other.PublicKey}
+	if err := check(false); err != nil {
+		t.Fatalf("pinned key still published: %v", err)
+	}
+	if err := check(true); err == nil || !strings.Contains(err.Error(), `"kid1"`) {
+		t.Fatalf("a published unpinned key went unnoticed: %v", err)
+	}
+	publish = []*rsa.PublicKey{&other.PublicKey}
+	for _, all := range []bool{false, true} {
+		if err := check(all); err == nil {
+			t.Fatalf("all=%v: a rotation went unnoticed", all)
+		}
 	}
 }
 

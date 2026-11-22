@@ -392,7 +392,8 @@ To bless a type: add its entry to `contract/events.yaml` and the same text to `h
 ArgoCD sync: the bridge picks it up within a few minutes of the sync (kubelet's ConfigMap refresh plus the 60 s poll). Land a values change that adds the contract together with the image pin that reads it, so the single writer restarts once.
 
 Every event also stores its raw producer in `events.producer` (jsonb, null before this): `{"kind":"client","name":...}`
-for an API client (the name is the verified token subject, which is the client table key), `{"kind":"route","name":...}` for `forgejo-webhook`, `forgejo-relist`, `github-webhook`,
+for an API client (the name is the client table key: the verified authentik subject, or the row whose `sa` the service account token names; such a token adds
+`"ns"`, `"sa"` and `"pod"`, the pod it is bound to), `{"kind":"route","name":...}` for `forgejo-webhook`, `forgejo-relist`, `github-webhook`,
 `alertmanager` or `grafana`.
 
 ## Errors
@@ -414,9 +415,10 @@ outermost. The registry is closed, in `internal/bus/errkeys.go`:
 |---|---|
 | `auth.bearer_required` | no `Authorization: Bearer` header |
 | `auth.token_invalid` | the token failed verification (signature, issuer, audience, claims) |
-| `auth.no_key_pinned` | the bridge has no `BRIDGE_OIDC_CERT`: every call is refused (its configuration, not the token) |
+| `auth.no_key_pinned` | the bridge has no `BRIDGE_OIDC_CERT` (or, for a service account token, no `BRIDGE_K8S_SA_KEY`): every such call is refused (its configuration, not the token) |
 | `auth.token_expired` | the token is past its exp, or a stream reached it: refresh and reconnect |
 | `auth.not_a_client` | a valid token for an account `BRIDGE_API_CLIENTS` does not list |
+| `auth.sa_not_a_client` | a valid service account token whose `<namespace>:<serviceaccount>` is no row's `sa` |
 | `auth.subscription_not_owned` | the subscription is not the client's name or under it |
 | `stream.token_near_expiry` | too little token left to open a stream |
 | `stream.gapped` | retention deleted events the subscription had not acked, or its System filter moved past untagged events after the grace window: reconnect for the gap, resync, ConfirmGap |
@@ -465,10 +467,12 @@ loop for a private key that does not parse).
 | `BRIDGE_FORGEJO_URL` | Forgejo's base URL for the relist loop, default `https://git.bnei.dev`; every page is fetched from this host. Not `https://`: a warning (the token goes in clear). |
 | `BRIDGE_TRUSTED_LOGINS` | Comma-separated GitHub logins whose actions on the operator's threads are trusted (operator, CI). Not `renovate[bot]`: its PR bodies carry third-party release notes. |
 | `BRIDGE_AGENT_LOGINS` | Comma-separated fleet agent logins. Tagged `actor=agent`, never trusted; the operator's comments and pushes on their PRs are. |
-| `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. `tag` lets a client call `Tag`. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |
+| `BRIDGE_API_CLIENTS` | API clients, JSON, keyed by authentik username: `{"bridge-core": {"kind": "agent", "privileged": true, "publish_types": ["dev.bnei.agent."], "publish_subjects": [""], "subscribe": [{"types": ["dev.bnei.github."], "subjects": [""]}]}}`. `kind` is `human\|bot\|agent\|machine` (default `machine`). `publish_types` are type prefixes, written with their final dot; `publish_subjects` subject prefixes (`""` allows any). `subscribe` is a list of rules, each pairing type prefixes with subject prefixes (`""` allows any subject): a subscription's whole filter must fit one rule, and an empty type list is refused. Only `bridge-core` may be `privileged`, which changes what it may stamp on `Publish`, never what it may read. `tag` lets a client call `Tag`. `sa` (`"<namespace>:<serviceaccount>"`, optional) lets that service account's projected token sign in as the row (see `BRIDGE_K8S_SA_KEY`); two rows may not share one, and the row keeps its name. A namespace's `default` account is refused (every pod that names no account runs as it), and `bridge-core`'s `sa` may only be `agent-fleet:bridge-core`: set it only once the admission policy that keeps provisioner pods off that account is live (plan M3, row B2), since anyone who can start a pod as an account can sign in as its row. Unknown fields are refused. Set in `helm/values.yaml` (no secret in it). |
 | `BRIDGE_OIDC_ISSUER`, `BRIDGE_OIDC_CLIENT_ID` | The authentik provider's issuer URL and client id; a token must carry both (`iss`, `aud`, `azp`). |
 | `BRIDGE_OIDC_CERT` | The pinned signing certificate(s), PEM: the only trust anchor. Empty: every API call is refused, the webhooks still work. |
 | `BRIDGE_OIDC_JWKS_URL` | Optional. The provider's JWKS, fetched hourly and compared with the pinned certificate; a mismatch is logged, never trusted. |
+| `BRIDGE_K8S_SA_KEY` | The pinned cluster service account key(s), PEM `PUBLIC KEY` (from `kubectl get --raw /openid/v1/jwks`), beside authentik: a projected token with `iss` `https://192.168.1.211:6443`, `aud` containing `ukubi-bridge`, RS256, a `kubernetes.io` pod claim and `exp - iat` at most 1h (plus 1 min) signs in as the client row whose `sa` is its `<namespace>:<serviceaccount>`. The token's `iss`, read before any check, picks the verifier. The check is offline (no TokenReview): a token stays valid until its `exp`, up to 1h, even after its pod is deleted, and a leaked one can be replayed for that long. So the stored `pod` is the pod the token is bound to, not proof that this pod sent it. Unset or blank: every service account token is refused (`k8s-sa-auth` reads 0, one WARN). Does not parse: the bridge refuses to start. Re-pin after a cluster rebuild. |
+| `BRIDGE_K8S_JWKS_URL` | Optional. The cluster's JWKS (`https://kubernetes.default.svc/openid/v1/jwks`), fetched hourly with the pod's own token and the in-cluster CA and compared with the pinned keys; any published key that is not pinned is logged by its `kid` (a signing-key rotation signs new tokens with the new key at once, so they are refused until it is pinned), never trusted. The URL receives the pod's token: it must be https (otherwise a WARN and the check is off), and redirects are not followed. Keep it the API server. |
 | `BRIDGE_GITHUB_APP_ID` | App id, for the reconcile loop. Unset (or no key): reconcile is off, with a warning. |
 | `BRIDGE_GITHUB_APP_PRIVATE_KEY` | The App's private key, PEM (PKCS#1 as GitHub issues it, or PKCS#8). |
 | `BRIDGE_RECONCILE_LOOKBACK` | Go duration, default `6h`. Keep event retention longer than this. |
@@ -483,9 +487,10 @@ loop for a private key that does not parse).
 
 `/metrics` is served on its own listener, `BRIDGE_METRICS_ADDR` (default `:9090`), never on the public port; the chart's
 Service and ServiceMonitor carry it as the `metrics` port. A flow is one of `forgejo-webhook`, `forgejo-relist`,
-`github-webhook`, `github-reconcile`, `alertmanager`, `grafana`, `oidc-jwks` (the hourly certificate check), or an API
-client's name (its `Publish`, e.g. `bridge-kwatch`). A flow that is switched off by missing configuration reads 0 on `bridge_flow_enabled` (most log one WARN naming the setting;
-the API client flows read 0 while no signing certificate is pinned). `oidc-jwks` and `github-reconcile` only report
+`github-webhook`, `github-reconcile`, `alertmanager`, `grafana`, `oidc-jwks` (the hourly certificate check),
+`k8s-sa-auth` (service account sign-in, on while `BRIDGE_K8S_SA_KEY` is pinned), `k8s-sa-jwks` (the hourly cluster key
+check), or an API client's name (its `Publish`, e.g. `bridge-kwatch`). A flow that is switched off by missing configuration reads 0 on `bridge_flow_enabled` (most log one WARN naming the setting;
+an API client's flow reads 0 while none of its tokens can be verified: no certificate pinned, and no cluster key or no `sa`). `oidc-jwks`, `k8s-sa-auth`, `k8s-sa-jwks` and `github-reconcile` only report
 enabled: their runs and failures log, they record no event series.
 
 | Series | Meaning |
@@ -495,6 +500,7 @@ enabled: their runs and failures log, they record no event series.
 | `bridge_flow_events_total{flow,type_prefix}` | Events accepted (webhooks, alert endpoints and `Publish` count redeliveries too; relist counts only inserted events), by the type up to its third dot (`dev.bnei.forge`). |
 | `bridge_relist_runs_total{result}` | Forgejo relist runs, `ok` or `error`. |
 | `bridge_tags_written_total` | Tags stored through `Tag`. |
+| `bridge_auth_refused_total{reason}` | API calls refused at sign-in, by their error key (`auth.bearer_required`, `auth.token_invalid`, `auth.no_key_pinned`, `auth.token_expired`, `auth.not_a_client`, `auth.sa_not_a_client`). |
 
 Alerts (`helm/values.yaml`, severity notice): `BridgeForgejoWebhookOff` (the Forgejo secret is unset, or the series is
 missing: no Forgejo event arrives). They ship with the ServiceMonitor, which stays `enabled: false` until the pinned image

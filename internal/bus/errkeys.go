@@ -25,6 +25,7 @@ const (
 	keyNoKey         Key = "auth.no_key_pinned"
 	keyExpired       Key = "auth.token_expired"
 	keyNotClient     Key = "auth.not_a_client"
+	keyNotSAClient   Key = "auth.sa_not_a_client"
 	keyNotOwned      Key = "auth.subscription_not_owned"
 	keyNearExpiry    Key = "stream.token_near_expiry"
 	keyGapped        Key = "stream.gapped"
@@ -53,11 +54,11 @@ const (
 // sourceStore is the store (pgx and Postgres): its words are the message of a keyStore or keyRefused error.
 const sourceStore = "store"
 
-// tokenKey is the key for a token the verifier refused: unpinned (the bridge's configuration), expired (refresh it),
-// or otherwise invalid.
+// tokenKey is the key for a token the verifier refused: unpinned (the bridge's configuration, authentik's certificate
+// or the cluster key), expired (refresh it), or otherwise invalid.
 func tokenKey(err error) Key {
 	switch {
-	case errors.Is(err, auth.ErrNoKey):
+	case errors.Is(err, auth.ErrNoKey), errors.Is(err, auth.ErrNoSAKey):
 		return keyNoKey
 	case errors.Is(err, auth.ErrExpired):
 		return keyExpired

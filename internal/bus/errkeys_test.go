@@ -365,7 +365,8 @@ func (f fixture) publishErr(ctx context.Context, tok string, e *bridgev1.CloudEv
 // TestTokenKey: a refused token is keyed by why: the bridge unpinned, the token expired, anything else.
 func TestTokenKey(t *testing.T) {
 	for err, want := range map[error]Key{
-		auth.ErrNoKey: keyNoKey, fmt.Errorf("verify: %w", auth.ErrExpired): keyExpired, errors.New("token: no sub"): keyToken,
+		auth.ErrNoKey: keyNoKey, auth.ErrNoSAKey: keyNoKey, fmt.Errorf("verify: %w", auth.ErrNoSAKey): keyNoKey,
+		fmt.Errorf("verify: %w", auth.ErrExpired): keyExpired, errors.New("token: no sub"): keyToken,
 	} {
 		if got := tokenKey(err); got != want {
 			t.Errorf("%v: %s, want %s", err, got, want)

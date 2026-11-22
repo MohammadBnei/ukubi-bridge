@@ -23,18 +23,19 @@ var envVars = []string{
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
 	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
 	"BRIDGE_FORGEJO_READER_TOKEN", "BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE", "BRIDGE_CONTRACT_FILE",
-	"BRIDGE_METRICS_ADDR",
+	"BRIDGE_METRICS_ADDR", "BRIDGE_K8S_SA_KEY", "BRIDGE_K8S_JWKS_URL",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
 // before anything is built. What only a constructor can check stays with it: the client table (bus.ParseClients),
-// the pinned certificate (auth.New) and the database URL (store.Open).
+// the pinned certificate (auth.New), the pinned cluster key (auth.NewSA) and the database URL (store.Open).
 type Config struct {
 	WebhookSecret   string
 	ForgejoSecret   string // "": no /webhook/forgejo route
 	LegacyClients   bool   // BRIDGE_CLIENTS is set: ignored, with a warning (ADR-0066)
 	APIClients      string
 	OIDC            OIDCConfig
+	K8s             K8sConfig
 	DatabaseURL     string
 	Trusted, Agents map[string]bool
 	AlertToken      string // "": both alert endpoints answer 503
@@ -60,6 +61,10 @@ type Config struct {
 
 // OIDCConfig is how API clients sign in through authentik (ADR-0066).
 type OIDCConfig struct{ Issuer, ClientID, Cert, JWKSURL string }
+
+// K8sConfig is how pods sign in with projected service account tokens (plan M3): the pinned cluster key (PEM, ""
+// turns it off) and the optional JWKS to compare it with.
+type K8sConfig struct{ SAKey, JWKSURL string }
 
 // RelistConfig is what the Forgejo relist loop reads.
 type RelistConfig struct {
@@ -103,6 +108,7 @@ func load(getenv func(string) string) (Config, *configError) {
 		APIClients:    getenv("BRIDGE_API_CLIENTS"),
 		OIDC: OIDCConfig{Issuer: getenv("BRIDGE_OIDC_ISSUER"), ClientID: getenv("BRIDGE_OIDC_CLIENT_ID"),
 			Cert: getenv("BRIDGE_OIDC_CERT"), JWKSURL: getenv("BRIDGE_OIDC_JWKS_URL")},
+		K8s:         K8sConfig{SAKey: getenv("BRIDGE_K8S_SA_KEY"), JWKSURL: getenv("BRIDGE_K8S_JWKS_URL")},
 		DatabaseURL: getenv("BRIDGE_DATABASE_URL"),
 		// Agents are never added to trusted: see github.Policy.
 		Trusted:    set(getenv("BRIDGE_TRUSTED_LOGINS")),
@@ -155,6 +161,13 @@ func load(getenv func(string) string) (Config, *configError) {
 			}
 			c.warn("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http(s) URL with its traces path (…/v1/traces); tracing is off", "value", shown)
 			c.Traces = ""
+		}
+	}
+	// The check sends the pod's own API token: never in clear.
+	if v := c.K8s.JWKSURL; v != "" {
+		if u, err := url.Parse(v); err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			c.warn("BRIDGE_K8S_JWKS_URL is not an https URL: it would send the pod's token in clear; the cluster key check is off")
+			c.K8s.JWKSURL = ""
 		}
 	}
 	repos, token, tokenFile, forgejoURL := getenv("BRIDGE_FORGEJO_RELIST_REPOS"), strings.TrimSpace(getenv("BRIDGE_FORGEJO_READER_TOKEN")), getenv("BRIDGE_FORGEJO_TOKEN_FILE"), getenv("BRIDGE_FORGEJO_URL")

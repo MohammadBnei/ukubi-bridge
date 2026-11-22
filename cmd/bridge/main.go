@@ -4,12 +4,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -58,10 +62,20 @@ func main() {
 		slog.Error("oidc", "err", err)
 		os.Exit(1)
 	}
-	if !tokens.Pinned() {
-		slog.Warn("no signing certificate pinned: the API refuses every call; webhooks still work")
+	sa, err := auth.NewSA(cfg.K8s.SAKey)
+	if err != nil {
+		slog.Error("k8s sa", "err", err)
+		os.Exit(1)
 	}
-	clientFlows(clients, tokens.Pinned())
+	if !tokens.Pinned() {
+		slog.Warn("no signing certificate pinned: the API refuses every authentik token; webhooks still work")
+	}
+	if sa.Pinned() {
+		metrics.Enable(metrics.K8sSAAuth)
+	} else {
+		metrics.Disable(metrics.K8sSAAuth, "BRIDGE_K8S_SA_KEY is unset: the API refuses every service account token")
+	}
+	clientFlows(clients, tokens.Pinned(), sa.Pinned())
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("open store", "err", err)
@@ -83,7 +97,7 @@ func main() {
 	metrics.Enable(metrics.GithubWebhook)
 	forgejoRoute(route, st, cfg)
 	bus.TagGrace = cfg.TagGrace
-	api := bus.New(st, clients, tokens)
+	api := bus.New(st, clients, auth.Tokens{OIDC: tokens, SA: sa})
 	mux.Handle(api.Handler(tel.Interceptors()...))
 
 	// Unset token: both answer 503 rather than serve open.
@@ -105,6 +119,20 @@ func main() {
 	default:
 		metrics.Enable(metrics.OIDCJWKS)
 		go tokens.Watch(ctx, cfg.OIDC.JWKSURL, &http.Client{Timeout: 10 * time.Second}, time.Hour)
+	}
+	switch {
+	case !sa.Pinned():
+		metrics.SetEnabled(metrics.K8sJWKS, false) // warned above: no cluster key pinned
+	case cfg.K8s.JWKSURL == "":
+		metrics.Disable(metrics.K8sJWKS, "BRIDGE_K8S_JWKS_URL is unset: the cluster key check is off")
+	default:
+		c, err := inCluster(saDir)
+		if err != nil {
+			metrics.Disable(metrics.K8sJWKS, "BRIDGE_K8S_JWKS_URL is set but the pod has no in-cluster credentials ("+err.Error()+"): the cluster key check is off")
+			break
+		}
+		metrics.Enable(metrics.K8sJWKS)
+		go sa.Watch(ctx, cfg.K8s.JWKSURL, c, time.Hour)
 	}
 	go retain(ctx, api, st, cfg.Retention, time.Hour)
 	go contract.Run(ctx, cfg.ContractFile, time.Minute)
@@ -171,13 +199,50 @@ func main() {
 	}
 }
 
-// clientFlows sets the gauge of every API client that publishes: on only while the API can verify a token.
-func clientFlows(clients map[string]bus.Client, pinned bool) {
+// clientFlows sets the gauge of every API client that publishes: on only while the API can verify one of its
+// tokens (authentik's, or its service account's when it has an sa).
+func clientFlows(clients map[string]bus.Client, oidc, sa bool) {
 	for name, c := range clients {
 		if len(c.PublishTypes) > 0 {
-			metrics.SetEnabled(name, pinned)
+			metrics.SetEnabled(name, oidc || (sa && c.SA != ""))
 		}
 	}
+}
+
+// saDir is where Kubernetes mounts the pod's own service account token and the cluster CA.
+const saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+// inCluster is a client for the API server's JWKS: the cluster CA, and the pod's own token, re-read on every request
+// (the kubelet rotates it).
+func inCluster(dir string) (*http.Client, error) {
+	ca, err := os.ReadFile(dir + "/ca.crt")
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		return nil, fmt.Errorf("%s/ca.crt holds no certificate", dir)
+	}
+	// No redirects: bearerFile would send the token to wherever one points.
+	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: bearerFile{path: dir + "/token",
+			next: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}}}, nil
+}
+
+// bearerFile sends the token in path as the bearer of every request.
+type bearerFile struct {
+	path string
+	next http.RoundTripper
+}
+
+func (b bearerFile) RoundTrip(r *http.Request) (*http.Response, error) {
+	tok, err := os.ReadFile(b.path)
+	if err != nil {
+		return nil, err
+	}
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
+	return b.next.RoundTrip(r)
 }
 
 // handlers counts the requests in flight, so main can wait for them after srv.Close, which does not.

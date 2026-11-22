@@ -122,6 +122,7 @@ func TestConfigWarnings(t *testing.T) {
 	const retention = "BRIDGE_RETENTION must be a Go duration of at least 24h; using the default"
 	const badKey = "BRIDGE_GITHUB_APP_PRIVATE_KEY does not parse; the reconcile loop is off"
 	const lookback = "BRIDGE_RECONCILE_LOOKBACK is not a Go duration; using the default"
+	const k8sJWKS = "BRIDGE_K8S_JWKS_URL is not an https URL: it would send the pod's token in clear; the cluster key check is off"
 	for _, c := range []struct {
 		name  string
 		env   map[string]string
@@ -134,6 +135,10 @@ func TestConfigWarnings(t *testing.T) {
 			func(c Config) bool { return c.Retention == 720*time.Hour }},
 		{"tag grace", map[string]string{"BRIDGE_TAG_GRACE": "0s"}, []string{"BRIDGE_TAG_GRACE must be a Go duration above 0; using the default [value 0s default 1m0s]"},
 			func(c Config) bool { return c.TagGrace == time.Minute }},
+		{"k8s jwks in clear", map[string]string{"BRIDGE_K8S_JWKS_URL": "http://kubernetes.default.svc/openid/v1/jwks"}, []string{k8sJWKS + " []"},
+			func(c Config) bool { return c.K8s.JWKSURL == "" }},
+		{"k8s jwks not a URL", map[string]string{"BRIDGE_K8S_JWKS_URL": "kubernetes.default.svc/openid/v1/jwks"}, []string{k8sJWKS + " []"},
+			func(c Config) bool { return c.K8s.JWKSURL == "" }},
 		{"key", map[string]string{"BRIDGE_GITHUB_APP_PRIVATE_KEY": "nope"}, []string{badKey + " [err no PEM block in private key]"},
 			func(c Config) bool { return c.App == nil }},
 		{"lookback", map[string]string{"BRIDGE_RECONCILE_LOOKBACK": "nope"}, []string{lookback + ` [err time: invalid duration "nope" default 6h0m0s]`},
@@ -169,8 +174,9 @@ func TestConfigWarnings(t *testing.T) {
 	}
 	// The positive control: good values give no warning and are used.
 	c, err := load(envOf(map[string]string{"BRIDGE_GITHUB_WEBHOOK_SECRET": "s", "BRIDGE_RETENTION": "24h", "BRIDGE_GITHUB_APP_ID": "7",
-		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h"}))
-	if err != nil || c.Warnings != nil || c.Retention != 24*time.Hour || c.App == nil || c.App.Lookback != time.Hour {
+		"BRIDGE_GITHUB_APP_PRIVATE_KEY": key, "BRIDGE_RECONCILE_LOOKBACK": "1h", "BRIDGE_K8S_JWKS_URL": "https://kubernetes.default.svc/openid/v1/jwks"}))
+	if err != nil || c.Warnings != nil || c.Retention != 24*time.Hour || c.App == nil || c.App.Lookback != time.Hour ||
+		c.K8s.JWKSURL != "https://kubernetes.default.svc/openid/v1/jwks" {
 		t.Errorf("good values: %v %+v", err, c)
 	}
 }
@@ -206,8 +212,8 @@ func TestConfigDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	documented := map[string]bool{}
-	for _, row := range regexp.MustCompile("(?m)^\\| (`[A-Z_]+`(?:, `[A-Z_]+`)*) \\|").FindAllStringSubmatch(string(readme), -1) {
-		for _, v := range regexp.MustCompile("`([A-Z_]+)`").FindAllStringSubmatch(row[1], -1) {
+	for _, row := range regexp.MustCompile("(?m)^\\| (`[A-Z][A-Z0-9_]*`(?:, `[A-Z][A-Z0-9_]*`)*) \\|").FindAllStringSubmatch(string(readme), -1) {
+		for _, v := range regexp.MustCompile("`([A-Z][A-Z0-9_]*)`").FindAllStringSubmatch(row[1], -1) {
 			documented[v[1]] = true
 		}
 	}

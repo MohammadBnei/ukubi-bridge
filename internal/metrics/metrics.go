@@ -20,7 +20,9 @@ const (
 	GithubReconcile = "github-reconcile"
 	Alertmanager    = "alertmanager"
 	Grafana         = "grafana"
-	OIDCJWKS        = "oidc-jwks" // the hourly JWKS check against the pinned certificate
+	OIDCJWKS        = "oidc-jwks"   // the hourly JWKS check against the pinned certificate
+	K8sSAAuth       = "k8s-sa-auth" // service account tokens: on while a cluster key is pinned
+	K8sJWKS         = "k8s-sa-jwks" // the hourly cluster JWKS check against the pinned key
 )
 
 var (
@@ -35,12 +37,20 @@ var (
 	// TagsWritten counts the tags the Tag RPC stored.
 	TagsWritten = promauto.NewCounter(prometheus.CounterOpts{Name: "bridge_tags_written_total",
 		Help: "Tags stored through the Tag RPC."})
+	authRefused = promauto.NewCounterVec(prometheus.CounterOpts{Name: "bridge_auth_refused_total",
+		Help: "API calls refused at sign-in, by reason (the error key: a closed set)."}, []string{"reason"})
 )
+
+// AuthRefused records one API call refused at sign-in; reason is its error key.
+func AuthRefused(reason string) { authRefused.WithLabelValues(reason).Inc() }
+
+// AuthRefusedFor is the refused counter of reason (tests).
+func AuthRefusedFor(reason string) prometheus.Counter { return authRefused.WithLabelValues(reason) }
 
 // Builtin reports whether name is one of the built-in flows.
 func Builtin(name string) bool {
 	switch name {
-	case ForgejoWebhook, ForgejoRelist, GithubWebhook, GithubReconcile, Alertmanager, Grafana, OIDCJWKS:
+	case ForgejoWebhook, ForgejoRelist, GithubWebhook, GithubReconcile, Alertmanager, Grafana, OIDCJWKS, K8sSAAuth, K8sJWKS:
 		return true
 	}
 	return false

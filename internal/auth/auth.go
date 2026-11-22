@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -67,7 +68,7 @@ func New(issuer, clientID, certPEM string) (*Verifier, error) {
 		}
 		v.keys = append(v.keys, k)
 	}
-	if len(v.keys) == 0 && certPEM != "" {
+	if len(v.keys) == 0 && strings.TrimSpace(certPEM) != "" { // a blank value (an empty helm block) is unset
 		return nil, errors.New("BRIDGE_OIDC_CERT is set but holds no PEM certificate")
 	}
 	if len(v.keys) > 0 && (issuer == "" || clientID == "") {
@@ -132,12 +133,17 @@ func (v *Verifier) Verify(raw string) (string, time.Time, error) {
 // keys is pinned, which is what a certificate rotation looks like. It never
 // changes what Verify trusts.
 func (v *Verifier) Watch(ctx context.Context, url string, client *http.Client, every time.Duration) {
-	if !v.Pinned() {
+	watch(ctx, "oidc", url, client, every, v.keys, "BRIDGE_OIDC_CERT", false)
+}
+
+// watch is Watch for any pinned key set: what names it in the log, setting is the variable to re-pin, all as compare.
+func watch(ctx context.Context, what, url string, client *http.Client, every time.Duration, keys []*rsa.PublicKey, setting string, all bool) {
+	if len(keys) == 0 {
 		return // nothing to compare yet
 	}
 	for {
-		if err := v.compare(ctx, url, client); err != nil {
-			slog.Warn("oidc: jwks check", "url", url, "err", err)
+		if err := compare(ctx, url, client, keys, setting, all); err != nil {
+			slog.Warn(what+": jwks check", "url", url, "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -147,7 +153,10 @@ func (v *Verifier) Watch(ctx context.Context, url string, client *http.Client, e
 	}
 }
 
-func (v *Verifier) compare(ctx context.Context, url string, client *http.Client) error {
+// compare fetches the JWKS at url and errs when none of its keys is pinned, or with all when any one is not: the
+// cluster signs with a new key as soon as it publishes it beside the old one, so one unpinned key already breaks
+// every new token.
+func compare(ctx context.Context, url string, client *http.Client, keys []*rsa.PublicKey, setting string, all bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -164,10 +173,17 @@ func (v *Verifier) compare(ctx context.Context, url string, client *http.Client)
 	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&set); err != nil {
 		return err
 	}
+	var unpinned []string
 	for _, k := range set.Keys {
-		if pub, ok := k.Key.(*rsa.PublicKey); ok && slices.ContainsFunc(v.keys, func(p *rsa.PublicKey) bool { return p.Equal(pub) }) {
-			return nil
+		if pub, ok := k.Key.(*rsa.PublicKey); !ok || !slices.ContainsFunc(keys, func(p *rsa.PublicKey) bool { return p.Equal(pub) }) {
+			unpinned = append(unpinned, k.KeyID)
 		}
 	}
-	return fmt.Errorf("none of the %d published keys is pinned: rotate BRIDGE_OIDC_CERT", len(set.Keys))
+	switch {
+	case len(unpinned) == len(set.Keys):
+		return fmt.Errorf("none of the %d published keys is pinned: rotate %s", len(set.Keys), setting)
+	case all && len(unpinned) > 0:
+		return fmt.Errorf("published keys %q are not pinned: add them to %s", unpinned, setting)
+	}
+	return nil
 }

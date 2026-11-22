@@ -2,8 +2,14 @@ package bus
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +21,13 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/auth"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 	bridgev1 "github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1"
 	"github.com/MohammadBnei/ukubi-bridge/proto/gen/go/bridge/v1/bridgev1connect"
@@ -28,23 +39,29 @@ type fixture struct {
 	srv *Server
 }
 
-// fakeTokens maps a bearer to its subject; every token is valid for exp.
+// fakeTokens maps a bearer to its subject; every token is valid for exp. A subject "sa:<ns>:<sa>" is a service
+// account token, bound to pod "<sa>-pod".
 type fakeTokens map[string]string
 
-func (f fakeTokens) Verify(raw string) (string, time.Time, error) {
+func (f fakeTokens) Verify(raw string) (auth.Identity, error) {
 	sub, ok := f[raw]
 	if !ok {
-		return "", time.Time{}, errors.New("unknown token")
+		return auth.Identity{}, errors.New("unknown token")
 	}
+	id := auth.Identity{Subject: sub, Expiry: time.Now().Add(time.Hour)}
 	if raw == "short-token" {
-		return sub, time.Now().Add(MinStreamLife + 300*time.Millisecond), nil
+		id.Expiry = time.Now().Add(MinStreamLife + 300*time.Millisecond)
 	}
-	return sub, time.Now().Add(time.Hour), nil
+	if rest, isSA := strings.CutPrefix(sub, "sa:"); isSA {
+		id.Namespace, id.ServiceAccount, _ = strings.Cut(rest, ":")
+		id.Subject, id.Pod = "system:serviceaccount:"+rest, id.ServiceAccount+"-pod"
+	}
+	return id, nil
 }
 
-// nobody is a valid authentik token for an account the table does not list.
+// nobody is a valid authentik token for an account the table does not list; sa-nobody one for a service account.
 var tokens = fakeTokens{"core-token": "bridge-core", "app-token": "app", "nobody-token": "nobody", "short-token": "bridge-core",
-	"atlas-token": "atlas"}
+	"atlas-token": "atlas", "sa-app-token": "sa:apps:app", "sa-nobody-token": "sa:apps:nobody", "sa-core-name-token": "sa:x:bridge-core"}
 
 // setup runs the API against its own fresh database, so it never races the
 // store package's TRUNCATE when `go test ./...` runs packages in parallel.
@@ -81,7 +98,7 @@ func setup(t *testing.T) fixture {
 	clients, err := ParseClients(`{
 		"bridge-core": {"kind": "agent", "publish_types": ["dev."], "publish_subjects": [""], "privileged": true,
 		                "subscribe": [{"types": ["dev."], "subjects": [""]}]},
-		"app":         {"kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"],
+		"app":         {"kind": "bot", "publish_types": ["dev.app."], "publish_subjects": ["app/"], "sa": "apps:app",
 		                "subscribe": [{"types": ["dev.app."], "subjects": ["app/"]}]},
 		"atlas":       {"publish_types": [], "publish_subjects": [], "tag": true,
 		                "subscribe": [{"types": ["dev."], "subjects": [""]}]}
@@ -356,6 +373,119 @@ func TestAuthz(t *testing.T) {
 		var ce *connect.Error
 		if !errors.As(c.err, &ce) || ce.Code() != c.code {
 			t.Errorf("%s: %v, want %v", c.name, c.err, c.code)
+		}
+	}
+}
+
+// TestSAClients: a service account token signs in as the row whose sa it is, its events carry the pod; the same row
+// still signs in with its authentik token; an account with no row is refused and counted, whatever its name.
+func TestSAClients(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.publish(t, "sa-app-token", ev("s1", "app/s"))
+	f.publish(t, "app-token", ev("s2", "app/s"))
+	producer := func(id string) (source, login string, p map[string]string) {
+		var raw []byte
+		if err := f.db.QueryRow(ctx, `SELECT source, actor_login, producer FROM events WHERE ce_id = $1`, id).Scan(&source, &login, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatal(err)
+		}
+		return source, login, p
+	}
+	if src, login, p := producer("s1"); src != "client/app" || login != "app" ||
+		!maps.Equal(p, map[string]string{"kind": "client", "name": "app", "ns": "apps", "sa": "app", "pod": "app-pod"}) {
+		t.Errorf("SA publish stored %s %s %v", src, login, p)
+	}
+	if src, _, p := producer("s2"); src != "client/app" || !maps.Equal(p, map[string]string{"kind": "client", "name": "app"}) {
+		t.Errorf("authentik publish stored %s %v", src, p)
+	}
+	// owns() sees the same row: an unsent gap, not an auth refusal.
+	if _, err := f.api.ConfirmGap(ctx, as("sa-app-token", &bridgev1.ConfirmGapRequest{Subscription: "app", Version: 5})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("SA ConfirmGap: %v", err)
+	}
+	refused := metrics.AuthRefusedFor("auth.sa_not_a_client")
+	before := testutil.ToFloat64(refused)
+	for _, tok := range []string{"sa-nobody-token", "sa-core-name-token"} {
+		err := f.publishErr(ctx, tok, ev("s3", "app/s"))
+		if k, _, _ := keyOf(err); connect.CodeOf(err) != connect.CodeUnauthenticated || k != "auth.sa_not_a_client" {
+			t.Errorf("%s: %v (key %q)", tok, err, k)
+		}
+	}
+	if got := testutil.ToFloat64(refused) - before; got != 2 {
+		t.Errorf("bridge_auth_refused_total{reason=auth.sa_not_a_client} rose by %v, want 2", got)
+	}
+}
+
+// TestSATokensEndToEnd runs the real chain: auth.Tokens picks the cluster verifier by iss, the SAVerifier checks the
+// token against the pinned key, auth maps its account to the row, and Publish stores its pod. Each refusal reaches
+// the client as its key and is counted under it.
+func TestSATokensEndToEnd(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	newKey := func() *rsa.PrivateKey {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	pinned, other := newKey(), newKey()
+	der, err := x509.MarshalPKIXPublicKey(&pinned.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa, err := auth.NewSA(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpinned, _ := auth.NewSA("")
+	oidc, _ := auth.New("", "", "")
+	sign := func(k *rsa.PrivateKey, iat time.Time) string {
+		s, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: k}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := jwt.Signed(s).Claims(map[string]any{
+			"iss": auth.K8sIssuer, "aud": []string{auth.K8sAudience}, "sub": "system:serviceaccount:apps:app",
+			"iat": iat.Unix(), "nbf": iat.Unix(), "exp": iat.Add(time.Hour).Unix(),
+			"kubernetes.io": map[string]any{"namespace": "apps", "pod": map[string]string{"name": "app-6c8d-q1"}, "serviceaccount": map[string]string{"name": "app"}},
+		}).Serialize()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	f.srv.tokens = auth.Tokens{OIDC: oidc, SA: sa}
+	f.publish(t, sign(pinned, time.Now()), ev("e2e-1", "app/s"))
+	var raw []byte
+	if err := f.db.QueryRow(ctx, `SELECT producer FROM events WHERE ce_id = 'e2e-1'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var p map[string]string
+	if err := json.Unmarshal(raw, &p); err != nil || !maps.Equal(p, map[string]string{"kind": "client", "name": "app", "ns": "apps", "sa": "app", "pod": "app-6c8d-q1"}) {
+		t.Errorf("stored producer %s (%v)", raw, err)
+	}
+	for _, c := range []struct {
+		name   string
+		tokens auth.Tokens
+		tok    string
+		key    string
+	}{
+		{"another cluster key", auth.Tokens{OIDC: oidc, SA: sa}, sign(other, time.Now()), "auth.token_invalid"},
+		{"expired", auth.Tokens{OIDC: oidc, SA: sa}, sign(pinned, time.Now().Add(-2*time.Hour)), "auth.token_expired"},
+		{"no cluster key pinned", auth.Tokens{OIDC: oidc, SA: unpinned}, sign(pinned, time.Now()), "auth.no_key_pinned"},
+	} {
+		f.srv.tokens = c.tokens
+		refused := metrics.AuthRefusedFor(c.key)
+		before := testutil.ToFloat64(refused)
+		err := f.publishErr(ctx, c.tok, ev("e2e-2", "app/s"))
+		if k, _, _ := keyOf(err); connect.CodeOf(err) != connect.CodeUnauthenticated || k != c.key {
+			t.Errorf("%s: %v (key %q), want %s", c.name, err, k, c.key)
+		}
+		if got := testutil.ToFloat64(refused) - before; got != 1 {
+			t.Errorf("%s: bridge_auth_refused_total{reason=%s} rose by %v, want 1", c.name, c.key, got)
 		}
 	}
 }

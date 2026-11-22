@@ -52,6 +52,11 @@ func TestParseClients(t *testing.T) {
 	if c := cs["bridge-core"]; c.Name != "bridge-core" || c.Kind != "machine" {
 		t.Fatalf("parsed %+v", c)
 	}
+	cs, err = ParseClients(`{"bridge-atlas": {"sa": "atlas:atlas"}, "bridge-kwatch": {"sa": "ukubi-bridge:bridge-kwatch.v2"}, "bridge-game": {},
+		"bridge-core": {"privileged": true, "sa": "agent-fleet:bridge-core"}}`)
+	if err != nil || cs["bridge-atlas"].SA != "atlas:atlas" || cs["bridge-game"].SA != "" || cs["bridge-core"].SA != PrivilegedSA {
+		t.Fatalf("sa rows: %+v %v", cs, err)
+	}
 	bad := map[string]string{
 		"privileged app":           `{"bridge-game": {"privileged": true}}`,
 		"slash in name":            `{"a/b": {}}`,
@@ -65,6 +70,17 @@ func TestParseClients(t *testing.T) {
 		"publish subject no slash": `{"bridge-game": {"publish_subjects": ["game"]}}`,
 		"trailing data":            `{"bridge-game": {}} {"bridge-push": {}}`,
 		"trailing brace":           `{"bridge-game": {}} }`,
+		"sa without namespace":     `{"bridge-game": {"sa": "atlas"}}`,
+		"sa empty part":            `{"bridge-game": {"sa": "atlas:"}}`,
+		"sa three parts":           `{"bridge-game": {"sa": "a:b:c"}}`,
+		"sa upper case":            `{"bridge-game": {"sa": "Atlas:atlas"}}`,
+		"sa dot in namespace":      `{"bridge-game": {"sa": "a.b:atlas"}}`,
+		"sa full subject":          `{"bridge-game": {"sa": "system:serviceaccount:atlas:atlas"}}`,
+		"sa shared":                `{"bridge-game": {"sa": "atlas:atlas"}, "bridge-push": {"sa": "atlas:atlas"}}`,
+		"sa default":               `{"bridge-game": {"sa": "atlas:default"}}`,
+		"privileged sa default":    `{"bridge-core": {"privileged": true, "sa": "agent-fleet:default"}}`,
+		"privileged sa other":      `{"bridge-core": {"privileged": true, "sa": "agent-fleet:provisioner"}}`,
+		"privileged sa other ns":   `{"bridge-core": {"privileged": true, "sa": "other:bridge-core"}}`,
 	}
 	for name, js := range bad {
 		if _, err := ParseClients(js); err == nil {

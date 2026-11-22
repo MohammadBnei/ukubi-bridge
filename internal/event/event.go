@@ -41,12 +41,19 @@ type Event struct {
 	Replayed     bool
 
 	// Producer is the raw ingest path, stored beside the event (never in it):
-	// {"kind":"client","name":...} or {"kind":"route","name":...}; later also ns, sa, pod.
+	// {"kind":"client","name":...} or {"kind":"route","name":...}; a client
+	// signed in with a service account token adds "ns", "sa" and "pod".
 	Producer json.RawMessage
 }
 
 // Producer builds the raw producer record for kind "client" or "route".
 func Producer(kind, name string) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"kind": kind, "name": name}) // strings only: cannot fail
+	return b
+}
+
+// PodProducer is a client's producer record with the pod its token was bound to.
+func PodProducer(name, ns, sa, pod string) json.RawMessage {
+	b, _ := json.Marshal(map[string]string{"kind": "client", "name": name, "ns": ns, "sa": sa, "pod": pod}) // strings only: cannot fail
 	return b
 }
