@@ -23,7 +23,7 @@ func TestHelmClientTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	core, game, push, atlas := cs["bridge-core"], cs["bridge-game"], cs["bridge-push"], cs["bridge-atlas"]
+	core, game, push, atlas, kwatch := cs["bridge-core"], cs["bridge-game"], cs["bridge-push"], cs["bridge-atlas"], cs["bridge-kwatch"]
 	for name, c := range cs {
 		if c.Privileged != (name == "bridge-core") {
 			t.Errorf("%s: privileged %v; only bridge-core is", name, c.Privileged)
@@ -76,5 +76,10 @@ func TestHelmClientTable(t *testing.T) {
 	}
 	if len(push.PublishTypes) != 0 {
 		t.Error("bridge-push publishes nothing")
+	}
+	// The k8s watch adapter writes deploy and k8s events on their own threads only, and reads nothing.
+	if len(kwatch.Subscribe) != 0 || !slices.Equal(kwatch.PublishTypes, []string{"dev.bnei.deploy.", "dev.bnei.k8s."}) ||
+		!slices.Equal(kwatch.PublishSubjects, []string{"argocd/", "k8s/"}) {
+		t.Errorf("bridge-kwatch: %+v", kwatch)
 	}
 }

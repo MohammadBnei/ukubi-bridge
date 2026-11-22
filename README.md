@@ -268,6 +268,108 @@ unparked, so work in rounds. Fix the subscriber, then:
 
 Once cleared, the next retention run deletes those events if they are old.
 
+## kwatch, the k8s watch adapter
+
+`cmd/kwatch` is a second binary in the same image, run as its own Deployment (`helm/kwatch.yaml`). It is an API
+client like any other, the authentik service account `bridge-kwatch`, signing in with a client_credentials grant
+(agent-fleet core's way), and publishes under `client/bridge-kwatch`. It watches the ArgoCD Applications
+(`argoproj.io/v1alpha1`) in `argocd` and the cluster's Warning events, with client-go informers, and publishes as
+below. `<app>` is the Application's name. Only `argocd` is watched: apps-in-any-namespace is off, so an Application
+elsewhere is reconciled by nothing (its status is whatever its creator wrote) and the contract has no subject or tag
+for it; turning it on widens the watch, the grant and the contract together.
+
+| Type | Subject | Data |
+|---|---|---|
+| `dev.bnei.deploy.health` | `argocd/<app>` | `health`, `previous` |
+| `dev.bnei.deploy.synced` | `argocd/<app>` | `sync`, `previous`, `previous_revisions`, `phase` (the operation's, empty when none synced it); `refs.revisions` from `status.sync.revisions` (or `revision`) |
+| `dev.bnei.deploy.flapping` | `argocd/<app>` | `signal` (always `health`), `transitions`, `window`, `current` |
+| `dev.bnei.k8s.warning` | `k8s/<ns>/<kind>/<name>` (`_` for a cluster-scoped object) | `refs` (`ns`, `kind`, `name`, `uid`, `api_version`, `field_path`, `reason`), `message_hash`, `count`, `component` |
+
+Against spike contract v0 (mountain-spike-coord `spike/contract/events.yaml`): types carry the `dev.bnei.` prefix,
+the Warning type is `k8s.warning` (v0: `k8s.event.warning`), `deploy.flapping` is new, and a Warning's refs have no
+`owner_chain` or `field_manager` (each would cost an API read per Event; not built until a reader needs them).
+
+An Application event's data also carries `refs.app` and `hints.system` = `app:<app>`: a hint, which atlas turns
+into the System tag (the bridge never resolves). The event's `time` is the object's own: `status.health.lastTransitionTime`
+for health; for sync, the last operation's `finishedAt` when it synced those very revisions, otherwise `reconciledAt`
+(an app often turns Synced at a new revision with no operation). A Warning's is its last observed time. Only a
+Warning's message hash rides the bus: the message is free text a workload wrote. Every id is derived from the object
+(its resourceVersion, or a Warning's uid and count), so a retry or a restart deduplicates on `(source, id)`.
+
+What the watcher keeps from spike S4 and doubt cycle 3 (M2):
+
+- The first sight of an app is its baseline, not an edge. So is every app's after a restart: kwatch keeps no state,
+  and atlas polls the levels.
+- Transitions of one app and signal closer together than `KWATCH_SETTLE` are one run. It emits once, from the first
+  previous value to the last, and a run that ends where it began (A → B → A) emits nothing. ukubi-stt's three flips
+  within 143 ms after its PR #41 become one `Degraded` → `Progressing`. Only arriving at `Synced` (or at a new
+  revision while Synced, when deployed) is a sync edge.
+- A run is closed after `KWATCH_SETTLE_CAP` even while it keeps changing, so an app flapping forever still emits.
+- Flapping is apart from settling: it counts every health transition into `Degraded` or `Missing` as kwatch sees
+  it, before a run absorbs it (a blip the window drops, or three entries within 150 ms, each count), per app in a
+  sliding `KWATCH_FLAP_WINDOW`. The `KWATCH_FLAP_COUNT`-th emits one `deploy.flapping` at once; the next only after
+  a whole window with none, so an app that keeps flapping, however slowly, flaps once per episode. Sync moves and
+  `Progressing`/`Healthy` moves never count, so the normal deploy cadence (`Healthy` → `Progressing` → `Healthy`,
+  `Synced` → `OutOfSync` → `Synced`) never flaps. A deploy whose rollout wobbles through `Degraded` (ukubi-stt's
+  does) is one entry: three such deploys within the window do flap.
+- Sync: a run emits `deploy.synced` when it arrives at `Synced`, or when it showed `Synced` at revisions other than
+  the last ones known even if it ends `OutOfSync` (the next commit or a drift landing within the window), and only
+  if that `Synced` was deployed: reached from `OutOfSync`, or synced by an operation (`operationState` synced those
+  very revisions). A revision-only move with no operation is not a deploy: every app lists infra-bootstrap's
+  common-app-chart among its sources, so each infra-bootstrap commit moves ~60 apps' revisions, and only the apps
+  it renders differently go `OutOfSync` and sync. `previous_revisions` are the last `Synced` revisions known (a
+  revision-only move included), however long it was `OutOfSync` in between; empty when kwatch has not seen the app
+  `Synced` since it started.
+- An Application whose health, sync status or revisions are not ArgoCD's vocabulary (its health and sync enums, a
+  sha, tag or chart version) is skipped and logged, never published: the fields reach agents' context.
+- A repeating Warning (its count climbing) is sent again at most every 10 minutes: a repeat within that is held, and
+  the latest one held goes out once the 10 minutes have passed, so an Event that goes quiet still has its last count
+  published. A Warning last observed more than 2 minutes before kwatch started is a baseline, recorded and not sent:
+  a restart or a first deploy does not replay the cluster's last hour, and the 2 minutes cover the restart's own gap
+  (what was sent before it dedups at the bridge).
+- Every field of a Warning but its message is free text too, and its subject and refs reach agents' context: an
+  Event whose namespace, kind, name or reason is not the shape Kubernetes writes (a DNS-1123 label, a CamelCase
+  identifier, a DNS-1123 subdomain, `^[A-Za-z][A-Za-z0-9]{0,63}$`) is dropped and logged; a `field_path`,
+  `component`, `api_version` or `uid` outside a plain token charset is sent empty.
+
+A refusal no retry can change (`InvalidArgument`, `PermissionDenied`) is logged and dropped; anything else is retried,
+backing off to a minute. Behind a bridge down long enough to queue 1024 events, the newest are dropped and logged.
+`GET /healthz` is 204 once both informers have listed. On SIGTERM, kwatch closes every run, one still settling
+included (the next start baselines on where it ended, so it would never be sent otherwise), sends every Warning held
+back, and drains the queue for up to 10 seconds before exiting. A transition that lands while kwatch is down is
+lost: the next start's first sight is its baseline. kwatch shares the bridge's image pin (Recreate), so it restarts
+exactly when ukubi-bridge and kwatch themselves roll out: their own deploys are visible only through atlas's level
+polls. Settings (env):
+
+- `BRIDGE_URL`, `BRIDGE_TOKEN_URL`, `BRIDGE_PASSWORD`: required, or kwatch refuses to start. The password is the
+  service account's app password, from a Secret.
+- `BRIDGE_AUTH_HOST`: authentik's public host, sent as the token request's Host so the issuer is the pinned one.
+- `BRIDGE_USERNAME` (default `bridge-kwatch`), `BRIDGE_CLIENT_ID` (default `ukubi-bridge-api`).
+- `KWATCH_SETTLE` (default `30s`), `KWATCH_SETTLE_CAP` (`5m`), `KWATCH_FLAP_WINDOW` (`15m`), `KWATCH_FLAP_COUNT`
+  (`3`, at least 2): a value that does not parse is logged at WARN and takes its default, and unless
+  `KWATCH_SETTLE` < `KWATCH_SETTLE_CAP` both take theirs.
+- `KUBECONFIG`: for a run from a laptop; unset, the pod's own account. `PORT` (default `8080`).
+
+Its grants are read only and live in infra-bootstrap, not here: a standing grant is reviewed there, next to the
+cluster's others (`gitops/platform/ukubi-game`, `gitops/platform/thot`, each applied by its own wave-1 Application in
+`gitops/bootstrap/`), and the common-app-chart renders no ServiceAccount or RBAC. They are the ServiceAccount
+`bridge-kwatch` in `ukubi-bridge-kwatch`; get/list/watch on `argoproj.io` `applications` in `argocd` (a Role); and
+get/list/watch on core `events` cluster-wide (a ClusterRole: the API cannot grant by field, so Normal Events are
+readable too, though kwatch lists `type=Warning` only). Not running yet: it needs
+
+- those grants, in infra-bootstrap `gitops/platform/ukubi-bridge-kwatch/` with its bounds Application;
+- a registry entry `ukubi-bridge-kwatch` (`valuesPath: [helm/kwatch.yaml]`, `deployPath: helm/image.yaml`);
+- the authentik service account `bridge-kwatch` (already declared in
+  `authentik-blueprint-ukubi-bridge-api.yaml`) with its app password, Infisical `BRIDGE_KWATCH_APP_PASSWORD`,
+  rendered as `BRIDGE_PASSWORD` into the Secret `ukubi-bridge-kwatch-config` in `ukubi-bridge-kwatch`;
+- kwatch's pods admitted by authentik's ingress fence (infra-bootstrap
+  `gitops/bootstrap/authentik-ciliumnetworkpolicy.yaml`, which admits only named pods to `:9000`): a `fromEndpoints`
+  entry `{k8s:io.kubernetes.pod.namespace: ukubi-bridge-kwatch, app.kubernetes.io/name: ukubi-bridge-kwatch}` on
+  `:9000`. Without it every token request is dropped and kwatch retries forever, logging at WARN, publishing
+  nothing. kwatch has no egress lock; one would allow DNS, the kube-apiserver, the bridge `:8080` and authentik
+  `:9000`;
+- `BRIDGE_OIDC_CERT` set on the bridge.
+
 ## Errors
 
 Every error a BridgeService handler returns carries Connect's code, the same words as before, and an

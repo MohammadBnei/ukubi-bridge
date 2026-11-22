@@ -233,8 +233,8 @@ var envReaders = map[string][]string{
 	"os/user":  nil,
 }
 
-// envReadsAllowed is the one file that reads the environment (plan/15 §5: one Config per binary).
-const envReadsAllowed = "cmd/bridge/config.go"
+// envReadsAllowed are the files that read the environment, one per binary (plan/15 §5: one Config per binary).
+var envReadsAllowed = map[string]bool{"cmd/bridge/config.go": true, "cmd/kwatch/config.go": true}
 
 func envUses(name string, src []byte) ([]string, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), name, src, parser.SkipObjectResolution|parser.ParseComments)
@@ -281,7 +281,7 @@ func envUses(name string, src []byte) ([]string, error) {
 	return uses, nil
 }
 
-// TestEnvBan: no non-test file of the module but cmd/bridge/config.go reads the environment (tests are exempt: the
+// TestEnvBan: no non-test file of the module but each binary's config.go reads the environment (tests are exempt: the
 // store's read BRIDGE_TEST_DATABASE_URL).
 func TestEnvBan(t *testing.T) {
 	root := "../.."
@@ -311,10 +311,10 @@ func TestEnvBan(t *testing.T) {
 			return err
 		}
 		switch {
-		case rel == envReadsAllowed && len(uses) == 0:
+		case envReadsAllowed[rel] && len(uses) == 0:
 			t.Errorf("%s reads no environment: the check no longer sees it", rel) // the positive control
-		case rel != envReadsAllowed && len(uses) > 0:
-			t.Errorf("%s reads the environment (%s): only %s does", rel, strings.Join(uses, ", "), envReadsAllowed)
+		case !envReadsAllowed[rel] && len(uses) > 0:
+			t.Errorf("%s reads the environment (%s): only %v do", rel, strings.Join(uses, ", "), slices.Sorted(maps.Keys(envReadsAllowed)))
 		}
 		return nil
 	})

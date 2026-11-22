@@ -86,7 +86,12 @@ env:
   # env, so a key of the same name in the envFrom Secret cannot override it.
   # Only bridge-core may be privileged; one subscription's filter must fit one
   # of its client's rules. bridge-atlas reads every type to resolve Systems and
-  # tags events with them (Tag); it publishes nothing.
+  # tags events with them (Tag); it publishes nothing. bridge-kwatch is the k8s
+  # watch adapter (helm/kwatch.yaml): it publishes deploy and k8s events, reads
+  # nothing. Its grant is the cross product of both lists (any deploy.* or
+  # k8s.* type on argocd/ or k8s/), accepted: a type prefix ends with a dot, so
+  # it cannot name the exact types (dev.bnei.deploy.health has no suffix to
+  # match), and publish has no per-type subject rules.
   - name: BRIDGE_API_CLIENTS
     value: |
       {
@@ -101,7 +106,9 @@ env:
         "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
           "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]},
         "bridge-atlas": {"kind": "machine", "publish_types": [], "publish_subjects": [], "tag": true,
-          "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]}
+          "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]},
+        "bridge-kwatch": {"kind": "machine",
+          "publish_types": ["dev.bnei.deploy.", "dev.bnei.k8s."], "publish_subjects": ["argocd/", "k8s/"]}
       }
   - name: BRIDGE_OIDC_ISSUER
     value: "https://authentik.bnei.dev/application/o/ukubi-bridge-api/"

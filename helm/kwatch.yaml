@@ -1,0 +1,81 @@
+# kwatch, the bridge's k8s watch adapter (cmd/kwatch; conception §6, spike S4), on infra-bootstrap's
+# common-app-chart: the bridge's own image run as a second Deployment. Read by ArgoCD through a registry entry of
+# its own (not added yet): `ukubi-bridge-kwatch`, namespace ukubi-bridge-kwatch, `valuesPath: [helm/kwatch.yaml]`,
+# and the bridge's `deployPath: helm/image.yaml`, so the one pin ukubi-ci bumps moves both Deployments.
+#
+# STANDALONE, as ukubi-game's helm/public.yaml: not layered on values.yaml, so none of the bridge's env, Secret or
+# database URL reaches this pod. Its only grants are infra-bootstrap's (gitops/platform/ukubi-bridge-kwatch/, README
+# "kwatch"): the chart renders no ServiceAccount or RBAC, a standing grant is reviewed there.
+
+# One watcher: a second would settle its own runs and publish them under the same ids only by chance.
+replicaCount: 1
+strategy:
+  type: Recreate
+
+image:
+  repository: registry.bnei.lan:5000/ukubi-bridge
+  # Replaced by the deploy branch's helm/image.yaml, layered last. `unreleased` fails loudly if it is not.
+  tag: "unreleased"
+
+# The image's CMD is /bridge; this runs the other binary in it.
+args: ["/kwatch"]
+
+# infra-bootstrap's: read Applications in argocd and Events cluster-wide. Nothing else.
+serviceAccountName: bridge-kwatch
+
+# GET /healthz only (204 once both informers have listed), never routed.
+service:
+  port: 8080
+ingress:
+  enabled: false
+
+# BRIDGE_PASSWORD only: the bridge-kwatch service account's app password, to be rendered by infra-bootstrap
+# (gitops/bootstrap/ukubi-bridge-kwatch-secret.yaml, not written yet). Not optional: kwatch refuses to start without
+# it. Env is bound at start: restart after a rotation.
+envFrom:
+  - secretRef:
+      name: ukubi-bridge-kwatch-config
+
+env:
+  - name: BRIDGE_URL
+    value: "http://ukubi-bridge.ukubi-bridge.svc.cluster.local:8080"
+  # authentik's token endpoint through its in-cluster Service, asked as its public host, so the token's issuer is the
+  # one the bridge pins (as agent-fleet core signs in).
+  - name: BRIDGE_TOKEN_URL
+    value: "http://platform-authentik-server.authentik.svc.cluster.local/application/o/token/"
+  - name: BRIDGE_AUTH_HOST
+    value: "authentik.bnei.dev"
+  # BRIDGE_USERNAME (bridge-kwatch), BRIDGE_CLIENT_ID (ukubi-bridge-api) and the KWATCH_* tuning take their defaults
+  # (README "kwatch").
+  - name: GOMEMLIMIT
+    value: "100MiB"
+
+livenessProbe:
+  enabled: true
+  path: /healthz
+  # The first list of every Warning event in the cluster can take a while on a cold API server.
+  initialDelaySeconds: 30
+readinessProbe:
+  enabled: true
+  path: /healthz
+
+# The informers cache the 60 Applications and the cluster's Warning events.
+resources:
+  requests:
+    cpu: 20m
+    memory: 48Mi
+  limits:
+    memory: 128Mi
+
+# distroless static:nonroot runs as 65532. Nothing writes to disk.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
