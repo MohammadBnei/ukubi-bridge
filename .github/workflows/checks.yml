@@ -1,0 +1,68 @@
+# Tests and lint on the Talos runner (k8s-ubuntu-latest). On a pull request, and
+# called from app.yml (workflow_call), whose image build needs them: main re-runs
+# the full gate before it builds. No image build on a PR (owner decision, CI/CD
+# split): images are CD's, built from reviewed main on the build runner.
+name: checks
+
+on:
+  workflow_call:
+  pull_request:
+
+# A newer push to a PR supersedes its older run; app.yml's call never cancels.
+# The PR payload, not event_name, which Forgejo reports as workflow_call in a call.
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event.pull_request && true || false }}
+
+permissions:
+  contents: read
+
+jobs:
+  # The Talos runner (k8s-ubuntu-latest): no service containers there, so the
+  # database tests get a disposable database from the dev IntegreSQL (ADR-0088,
+  # ukubi-ci's dev-db action). The tests create further databases of their own on
+  # that Postgres (the integresql_test role has CREATEDB).
+  test:
+    runs-on: k8s-ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Dev database
+        uses: MohammadBnei/ukubi-ci/actions/dev-db@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
+        with:
+          integresql-url: http://integresql.dev-services.svc.cluster.local:5000
+          postgres-host: dev-postgres.dev-services.svc.cluster.local
+          # An empty template: the store migrates on Open, so there is nothing to seed.
+          template-hash: bridge
+          timeout-seconds: '120'
+      - name: go vet + go test
+        run: |
+          set -euo pipefail
+          export BRIDGE_TEST_DATABASE_URL="$DATABASE_URL"
+          go vet ./...
+          go test -race ./...
+      - name: Give the dev database back
+        if: always()
+        uses: MohammadBnei/ukubi-ci/actions/dev-db-release@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
+
+  # golangci-lint v2.14.0, as agent-fleet's go.yml pins it (the version built
+  # with the go1.27.4 this module declares; a linter built with an older Go
+  # refuses a newer module). Default linters, no config file.
+  lint:
+    runs-on: k8s-ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0

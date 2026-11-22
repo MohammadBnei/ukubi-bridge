@@ -3,20 +3,15 @@
 # out. The bump (GITHUB_TOKEN) never triggers another run, and helm/** is not a trigger path, so it cannot loop.
 # No :latest is pushed any more (nothing pulls it).
 #
-# This repo is PUBLIC. A pull_request run uses the workflow file from the PR's
-# merge commit, which a fork author writes, so they can add their own job with
-# `runs-on: ukubi-build`; on that box `sudo buildah` is root. On Forgejo every
-# fork PR run waits for a maintainer's approval, and gets no secrets: read the
-# workflow diff of any fork PR before approving its run (the runner-label hole,
-# tracked as the CI/CD split). Tests run on the Talos runner (k8s-ubuntu-latest).
-# On a PR the image job builds only (image.yml's guard: no login, push or bump),
-# on the build LXC; the credential is Forgejo OIDC, which Infisical refuses to
-# any PR run.
+# This repo is PUBLIC, so no pull_request run reaches the build runner: this
+# workflow runs on push to main and dispatch only, and a PR runs checks.yml on
+# the Talos runner (no image build on a PR, owner decision, CI/CD split).
+# image.yml reads the registry credential over Forgejo OIDC, which Infisical
+# refuses to any PR run.
 name: app
 
 on:
   workflow_dispatch:
-  pull_request:
   push:
     branches: [main]
     paths:
@@ -26,11 +21,12 @@ on:
       - 'go.sum'
       - 'Dockerfile'
       - '.github/workflows/app.yml'
+      - '.github/workflows/checks.yml'
 
-# A newer push to a PR supersedes its older run; push and dispatch runs never cancel (run_id keeps them apart).
+# A push never cancels a running build (a newer one queues behind it and replaces any pending run).
 concurrency:
   group: app-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 # The default for a job with no permissions block of its own. Every job here
 # declares one today (the image job grants what image.yml needs), so this
@@ -39,64 +35,20 @@ permissions:
   contents: read
 
 jobs:
-  # The Talos runner (k8s-ubuntu-latest): no service containers there, so the
-  # database tests get a disposable database from the dev IntegreSQL (ADR-0088,
-  # ukubi-ci's dev-db action). The tests create further databases of their own on
-  # that Postgres (the integresql_test role has CREATEDB).
-  test:
-    runs-on: k8s-ubuntu-latest
-    timeout-minutes: 15
+  # Forgejo runs no if: on a uses: job reliably, so the gate is a called workflow:
+  # checks.yml holds test and lint, on main as on a PR.
+  checks:
+    uses: ./.github/workflows/checks.yml
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
-      - name: Dev database
-        uses: MohammadBnei/ukubi-ci/actions/dev-db@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
-        with:
-          integresql-url: http://integresql.dev-services.svc.cluster.local:5000
-          postgres-host: dev-postgres.dev-services.svc.cluster.local
-          # An empty template: the store migrates on Open, so there is nothing to seed.
-          template-hash: bridge
-          timeout-seconds: '120'
-      - name: go vet + go test
-        run: |
-          set -euo pipefail
-          export BRIDGE_TEST_DATABASE_URL="$DATABASE_URL"
-          go vet ./...
-          go test -race ./...
-      - name: Give the dev database back
-        if: always()
-        uses: MohammadBnei/ukubi-ci/actions/dev-db-release@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
-
-  # golangci-lint v2.14.0, as agent-fleet's go.yml pins it (the version built
-  # with the go1.27.4 this module declares; a linter built with an older Go
-  # refuses a newer module). Default linters, no config file.
-  lint:
-    runs-on: k8s-ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.14.0
 
   # Build, push and deploy live in the shared ukubi-ci workflow (digest-pinned tag, stale-run guard, deploy job).
   # The workflow-level group above serialises main runs (Forgejo ignores image.yml's job-level groups).
   image:
-    needs: [test, lint]
+    needs: checks
     # Registry creds are readable only on push/workflow_dispatch (OIDC claim),
     # and image.yml's build job is the only one on the self-hosted runner.
-    # No if: here. Forgejo evaluates a uses: job's if inside the called jobs,
-    # where event_name is workflow_call, so it skipped every build. image.yml's
-    # guard keeps pull_request runs build-only.
+    # No if: here: Forgejo evaluates a uses: job's if inside the called jobs.
     uses: MohammadBnei/ukubi-ci/.github/workflows/image.yml@d683f2091575188024f7e1200e619977d9db19ae # ukubi-ci PR 28 head; re-pin to the release
     with:
       # The pin file on the deploy branch (ukubi-ci 0.11), not main's values.
