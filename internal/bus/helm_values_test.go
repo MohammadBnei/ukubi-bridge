@@ -36,11 +36,11 @@ func TestHelmClientTable(t *testing.T) {
 			t.Errorf("%s: tag %v; only bridge-atlas tags", name, c.Tag)
 		}
 	}
-	// Atlas reads every type, Forgejo's included, and publishes nothing.
+	// Atlas reads every type, Forgejo's included, and publishes only its world events.
 	if atlas.SA != "mountain:atlas" {
 		t.Errorf("bridge-atlas sa %q, want mountain:atlas (its pod identity, infra gitops/platform/mountain)", atlas.SA)
 	}
-	if len(atlas.PublishTypes)+len(atlas.PublishSubjects) != 0 || !atlas.mayRead([]string{"dev.bnei."}, nil) {
+	if !slices.Equal(atlas.PublishTypes, []string{"dev.bnei.world."}) || !slices.Equal(atlas.PublishSubjects, []string{"world/"}) || !atlas.mayRead([]string{"dev.bnei."}, nil) {
 		t.Errorf("bridge-atlas: %+v", atlas)
 	}
 	if !core.mayRead([]string{"dev.bnei.forge.", "dev.bnei.github."}, nil) {

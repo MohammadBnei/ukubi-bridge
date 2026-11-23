@@ -61,6 +61,14 @@ types:
   - {type: dev.bnei.fleet.session.waiting, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:waiting", ce_id_kind: fact, producer: client/bridge-core, trust: []}
   - {type: dev.bnei.fleet.session.resumed, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:resumed", ce_id_kind: fact, producer: client/bridge-core, trust: []}
 
+  # atlas world events (client bridge-atlas, subjects world/). Node ids hold "/", so a subject is a prefix match on "world/", never a
+  # one-segment glob. No entity.changed: a move (Realm/Parent/Group change) is not an event; the library re-reads atlas for current state.
+  - {type: dev.bnei.world.entity.created, subject: "world/<node id>", ce_id: "<node id>:created:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.entity.retired, subject: "world/<node id>", ce_id: "<node id>:retired:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.bond.added, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:added:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.bond.removed, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:removed:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.history.rebased, subject: "world/", ce_id: "rebased:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox; rebased means re-snapshot atlas at this epoch.seq, per-entity events before it are not a complete history"}
+
   # GitHub: retiring with the move to Forgejo. A redelivery keeps its X-GitHub-Delivery GUID, so it is deduplicated; only separate deliveries of one fact are stored twice.
   - {type: dev.bnei.github.pull_request.opened, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}
   - {type: dev.bnei.github.pull_request.synchronize, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}

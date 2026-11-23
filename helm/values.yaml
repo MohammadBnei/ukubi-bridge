@@ -101,7 +101,8 @@ env:
   # env, so a key of the same name in the envFrom Secret cannot override it.
   # Only bridge-core may be privileged; one subscription's filter must fit one
   # of its client's rules. bridge-atlas reads every type to resolve Systems and
-  # tags events with them (Tag); it publishes nothing. It signs in with its pod's
+  # tags events with them (Tag); it publishes only its world events
+  # (dev.bnei.world. on world/; the row name is frozen: it is the event source, so dedup and consumers key on it). It signs in with its pod's
   # projected token ("sa"), or still with its authentik password. bridge-kwatch is the k8s
   # watch adapter (helm/kwatch.yaml): it publishes deploy and k8s events, reads
   # nothing. Its grant is the cross product of both lists (any deploy.* or
@@ -121,7 +122,7 @@ env:
                         {"types": ["dev.bnei.alert."], "subjects": [""]}]},
         "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
           "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]},
-        "bridge-atlas": {"kind": "machine", "sa": "mountain:atlas", "publish_types": [], "publish_subjects": [], "tag": true,
+        "bridge-atlas": {"kind": "machine", "sa": "mountain:atlas", "publish_types": ["dev.bnei.world."], "publish_subjects": ["world/"], "tag": true,
           "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]},
         "bridge-kwatch": {"kind": "machine",
           "publish_types": ["dev.bnei.deploy.", "dev.bnei.k8s."], "publish_subjects": ["argocd/", "k8s/"]}
@@ -429,6 +430,14 @@ extraManifests:
           - {type: "dev.bnei.agent.*", subject: "forge/... or agent/...", ce_id: "hex(sha256(session id \\x00 idempotency_key)[:16]) when the agent gives an idempotency_key, else a random uuid", ce_id_kind: transport, producer: client/bridge-core, trust: [actor_trusted], note: "a fact (a retry is the same event) only with an idempotency_key; without one a retry is stored twice. actor_trusted only when a bridge event caused the publishing session"}
           - {type: dev.bnei.fleet.session.waiting, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:waiting", ce_id_kind: fact, producer: client/bridge-core, trust: []}
           - {type: dev.bnei.fleet.session.resumed, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:resumed", ce_id_kind: fact, producer: client/bridge-core, trust: []}
+
+          # atlas world events (client bridge-atlas, subjects world/). Node ids hold "/", so a subject is a prefix match on "world/", never a
+          # one-segment glob. No entity.changed: a move (Realm/Parent/Group change) is not an event; the library re-reads atlas for current state.
+          - {type: dev.bnei.world.entity.created, subject: "world/<node id>", ce_id: "<node id>:created:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+          - {type: dev.bnei.world.entity.retired, subject: "world/<node id>", ce_id: "<node id>:retired:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+          - {type: dev.bnei.world.bond.added, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:added:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+          - {type: dev.bnei.world.bond.removed, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:removed:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+          - {type: dev.bnei.world.history.rebased, subject: "world/", ce_id: "rebased:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox; rebased means re-snapshot atlas at this epoch.seq, per-entity events before it are not a complete history"}
 
           # GitHub: retiring with the move to Forgejo. A redelivery keeps its X-GitHub-Delivery GUID, so it is deduplicated; only separate deliveries of one fact are stored twice.
           - {type: dev.bnei.github.pull_request.opened, subject: "github/<owner>/<repo>/pr/<n>", ce_id: "<X-GitHub-Delivery>", ce_id_kind: transport, status: retiring, producer: github, trust: [actor_trusted, thread_owned]}

@@ -379,7 +379,10 @@ subject pattern, the exact `ce_id` recipe (`ce_id_kind: fact` is derived from th
 copy is the same event; `transport` is a delivery id, so a redelivery is stored twice), its producer and its trust
 facts. The same file is the ConfigMap `ukubi-bridge-contract` in `helm/values.yaml` (a test keeps them identical),
 mounted as a directory so an edit reaches the pod without a restart. `dev.bnei.agent.*` is a prefix: agents name
-their own types under it.
+their own types under it. The `dev.bnei.world.*` rows are atlas's (`bridge-atlas`, the only row with `tag` that also
+publishes; its name is frozen, it is the event source). Node ids hold `/`, so `world/<id>` is matched as a plain
+prefix (`world/`), not a one-segment glob. A move (Realm/Parent/Group change) is not an event: the library re-reads
+atlas for current state.
 
 An event whose type is not in the contract is still stored and delivered, with `flags: ["uncontracted"]` on the
 `CloudEvent`. Flags are computed at delivery against the current contract, so blessing a type unflags its backlog
