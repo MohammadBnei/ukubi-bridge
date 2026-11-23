@@ -145,7 +145,7 @@ func Known(t string) bool {
 // nothing is flagged.
 func Run(ctx context.Context, path string, every time.Duration) {
 	if path == "" {
-		slog.Warn("event contract not configured: BRIDGE_CONTRACT_FILE is unset; no event is flagged uncontracted")
+		slog.Warn("event contract not loaded: BRIDGE_CONTRACT_FILE is unset (not configured); no event is flagged uncontracted")
 		return
 	}
 	for {
