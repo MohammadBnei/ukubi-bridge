@@ -46,6 +46,8 @@ CREATE INDEX IF NOT EXISTS dead_letters_parked ON dead_letters (subscription, su
 
 -- The GitHub reconcile loop looks deliveries up by GUID alone.
 CREATE INDEX IF NOT EXISTS events_ce_id ON events (ce_id);
+-- InsertAlert counts the resolves of one alert.
+CREATE INDEX IF NOT EXISTS events_alert_subject ON events (subject) WHERE type LIKE 'dev.bnei.alert.%';
 
 -- The raw ingest path of an event (event.Producer); null for rows from before it.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS producer jsonb;

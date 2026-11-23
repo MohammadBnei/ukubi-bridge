@@ -230,3 +230,85 @@ func TestTaggedLatestVersion(t *testing.T) {
 		t.Error("tracked matches only a subscription that opted into it")
 	}
 }
+
+func TestInsertAlertEpisodes(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	const at = "2026-10-18T09:00:00Z"
+	alert := func(status string) event.Event {
+		return event.Event{ID: "fp:" + status + ":" + at, Source: "alertmanager", Type: "dev.bnei.alert." + status,
+			Subject: "alert/fp", Actor: event.ActorMachine, Data: []byte(`{"startsAt":"` + at + `"}`), Time: time.Unix(0, 0)}
+	}
+	steps := []struct {
+		status string
+		want   bool
+		id     string
+	}{
+		{"firing", true, "fp:firing:" + at + ":0"},
+		{"firing", false, ""}, // retry / repeat notification
+		{"resolved", true, "fp:resolved:" + at + ":0"},
+		{"resolved", false, ""},                    // resolved retry
+		{"firing", true, "fp:firing:" + at + ":1"}, // re-fire after resolve
+		{"firing", false, ""},
+		{"resolved", true, "fp:resolved:" + at + ":1"}, // second resolve
+		{"resolved", false, ""},
+	}
+	for i, st := range steps {
+		got, err := s.InsertAlert(ctx, alert(st.status))
+		if err != nil || got != st.want {
+			t.Fatalf("step %d %s: stored=%v err=%v, want %v", i, st.status, got, err, st.want)
+		}
+		if st.want {
+			var n int
+			if err := s.db.QueryRow(ctx, `SELECT count(*) FROM events WHERE ce_id = $1`, st.id).Scan(&n); err != nil || n != 1 {
+				t.Fatalf("step %d: id %s count %d err %v", i, st.id, n, err)
+			}
+		}
+	}
+}
+
+// Ids stored before episodes existed (no suffix) keep their form and still dedup their retries.
+func TestInsertAlertLegacyIDs(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	const at = "2026-10-18T09:00:00Z"
+	for _, status := range []string{"firing", "resolved"} {
+		old := event.Event{ID: "fp:" + status + ":" + at, Source: "alertmanager", Type: "dev.bnei.alert." + status,
+			Subject: "alert/fp", Actor: event.ActorMachine, Data: []byte(`{"startsAt":"` + at + `"}`), Time: time.Unix(0, 0)}
+		if ok, err := s.Insert(ctx, old); !ok || err != nil {
+			t.Fatal(ok, err)
+		}
+		if ok, err := s.InsertAlert(ctx, old); ok || err != nil {
+			t.Fatalf("legacy %s retry stored: %v %v", status, ok, err)
+		}
+	}
+}
+
+func TestInsertAlertConcurrentDuplicate(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	e := event.Event{ID: "fp:firing:x", Source: "alertmanager", Type: "dev.bnei.alert.firing", Subject: "alert/fp",
+		Actor: event.ActorMachine, Data: []byte(`{"startsAt":"x"}`), Time: time.Unix(0, 0)}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	stored := 0
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := s.InsertAlert(ctx, e)
+			if err != nil {
+				t.Error(err)
+			}
+			if ok {
+				mu.Lock()
+				stored++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if stored != 1 {
+		t.Fatalf("stored %d rows, want 1", stored)
+	}
+}

@@ -28,9 +28,9 @@ type alert struct {
 }
 
 // Normalize builds the bus event for one alert of a notification. The ce_id
-// is fingerprint:status:startsAt, so Alertmanager's repeat_interval resends of
-// the same firing coalesce into one event, while its resolution, or a later
-// firing of the same alert, is a new one (ADR-0071 §6).
+// is the base fingerprint:status:startsAt; store.InsertAlert appends the episode,
+// so repeat_interval resends of one state coalesce while its resolution, or a
+// firing that returns after a resolve, is a new event (ADR-0071 §6, ADR-0092).
 func Normalize(source string, raw json.RawMessage, now time.Time) (event.Event, error) {
 	var a alert
 	if err := json.Unmarshal(raw, &a); err != nil {

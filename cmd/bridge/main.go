@@ -108,8 +108,8 @@ func main() {
 		metrics.Enable(metrics.Alertmanager)
 		metrics.Enable(metrics.Grafana)
 	}
-	route("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.Insert))
-	route("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.Insert))
+	route("POST /webhook/alertmanager", alert.Handler("alertmanager", cfg.AlertToken, st.InsertAlert))
+	route("POST /webhook/grafana", alert.Handler("grafana", cfg.AlertToken, st.InsertAlert))
 
 	switch {
 	case cfg.OIDC.JWKSURL == "":

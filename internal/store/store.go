@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +103,60 @@ func (s *Store) listen(ctx context.Context) {
 // Insert appends e to the log. It returns false, nil when (source, ce_id) is
 // already there: a redelivery is not an error.
 func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
+	return s.insert(ctx, e, nil)
+}
+
+// InsertAlert stores an alert event whose ID is the base fingerprint:status:startsAt
+// and appends its episode (ADR-0092): the number of resolved events already stored
+// for that fingerprint and startsAt. A firing that returns after a resolve is a new
+// episode, so UNIQUE(source, ce_id) keeps it; retries and repeat notifications of
+// the same state compute the same id and dedup. A resolved closes the latest stored
+// firing episode, so its retry computes the same number. Ids stored before episodes
+// existed (no suffix) count as episode 0: their retries dedup.
+// Race-free: the episode is read inside insert's transaction, after the global advisory lock.
+// ponytail: a late retry of a firing after its resolve reads as a re-fire and is stored once more;
+// the payloads are identical, so the two cannot be told apart.
+func (s *Store) InsertAlert(ctx context.Context, e event.Event) (bool, error) {
+	return s.insert(ctx, e, func(tx pgx.Tx, e *event.Event) (bool, error) {
+		var d struct {
+			StartsAt string `json:"startsAt"`
+		}
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return false, err
+		}
+		fp := strings.TrimPrefix(e.Subject, "alert/")
+		exists := func(id string) (ok bool, err error) {
+			err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE source = $1 AND ce_id = $2)`,
+				e.Source, id).Scan(&ok)
+			return
+		}
+		var resolved int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM events WHERE source = $1 AND subject = $2
+			AND type = 'dev.bnei.alert.resolved' AND data->>'startsAt' = $3`,
+			e.Source, e.Subject, d.StartsAt).Scan(&resolved); err != nil {
+			return false, err
+		}
+		ep := resolved
+		if e.Type == "dev.bnei.alert.resolved" && ep > 0 {
+			open, err := exists(fp + ":firing:" + d.StartsAt + ":" + strconv.Itoa(ep))
+			if err != nil {
+				return false, err
+			}
+			if !open {
+				ep-- // the last resolve is already stored: this is its retry
+			}
+		}
+		if ep == 0 {
+			if old, err := exists(e.ID); err != nil || old {
+				return old, err
+			}
+		}
+		e.ID += ":" + strconv.Itoa(ep)
+		return false, nil
+	})
+}
+
+func (s *Store) insert(ctx context.Context, e event.Event, prep func(pgx.Tx, *event.Event) (bool, error)) (bool, error) {
 	// jsonb rejects \u0000, which would turn a permanent payload problem into
 	// an endless 503/redelivery loop.
 	// ponytail: also rewrites an escaped backslash followed by "u0000"; accepted.
@@ -112,6 +168,11 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(insertLock)); err != nil {
 		return false, err
+	}
+	if prep != nil {
+		if dup, err := prep(tx, &e); err != nil || dup {
+			return false, err
+		}
 	}
 	var id int64
 	err = tx.QueryRow(ctx, `
