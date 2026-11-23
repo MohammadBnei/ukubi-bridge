@@ -37,9 +37,19 @@ var (
 	// TagsWritten counts the tags the Tag RPC stored.
 	TagsWritten = promauto.NewCounter(prometheus.CounterOpts{Name: "bridge_tags_written_total",
 		Help: "Tags stored through the Tag RPC."})
+	typeUncontracted = promauto.NewCounterVec(prometheus.CounterOpts{Name: "bridge_type_uncontracted_total",
+		Help: "Stored events whose type is not in the event contract, by producer (an API client row or a route name)."}, []string{"producer"})
 	authRefused = promauto.NewCounterVec(prometheus.CounterOpts{Name: "bridge_auth_refused_total",
 		Help: "API calls refused at sign-in, by reason (the error key: a closed set)."}, []string{"reason"})
 )
+
+// TypeUncontracted records one stored event of an uncontracted type; producer is its client row or route name.
+func TypeUncontracted(producer string) { typeUncontracted.WithLabelValues(producer).Inc() }
+
+// TypeUncontractedFor is the uncontracted counter of producer (tests).
+func TypeUncontractedFor(producer string) prometheus.Counter {
+	return typeUncontracted.WithLabelValues(producer)
+}
 
 // AuthRefused records one API call refused at sign-in; reason is its error key.
 func AuthRefused(reason string) { authRefused.WithLabelValues(reason).Inc() }

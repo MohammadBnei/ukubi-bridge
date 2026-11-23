@@ -20,6 +20,7 @@ import (
 
 	"github.com/MohammadBnei/ukubi-bridge/internal/contract"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
+	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 )
 
 //go:embed schema.sql
@@ -216,6 +217,7 @@ func (s *Store) insert(ctx context.Context, e event.Event, prep func(pgx.Tx, *ev
 	// The one ingest choke point: logged once per stored event (the chart's Loki rule alerts on this line).
 	if contract.Flags(e.Type) != nil {
 		slog.Warn("event type uncontracted", "type", e.Type, "source", e.Source, "producer", string(e.Producer))
+		metrics.TypeUncontracted(producerName(e.Producer))
 	}
 	return true, nil
 }
@@ -644,4 +646,13 @@ func (s *Store) Tag(ctx context.Context, tagger string, tags []Tag) error {
 	}
 	_, err = s.db.Exec(ctx, `SELECT pg_notify($1, '')`, notifyChannel)
 	return err
+}
+
+// producerName is the "name" of a raw producer record (a client row or route name); "unknown" when there is none.
+func producerName(p json.RawMessage) string {
+	var v struct{ Name string }
+	if json.Unmarshal(p, &v) != nil || v.Name == "" {
+		return "unknown"
+	}
+	return v.Name
 }

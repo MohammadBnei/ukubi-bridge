@@ -506,6 +506,7 @@ enabled: their runs and failures log, they record no event series.
 | `bridge_flow_enabled{flow}` | 1 if the flow is on, 0 if its setting is missing or unusable. |
 | `bridge_flow_last_event_timestamp{flow}` | Unix seconds of the last event accepted on the flow (absent until the first one since start). |
 | `bridge_flow_events_total{flow,type_prefix}` | Events accepted (webhooks, alert endpoints and `Publish` count redeliveries too; relist counts only inserted events), by the type up to its third dot (`dev.bnei.forge`). |
+| `bridge_type_uncontracted_total{producer}` | Stored events whose type is not in the contract (once a contract has loaded), by producer: an API client row or a route name. |
 | `bridge_relist_runs_total{result}` | Forgejo relist runs, `ok` or `error`. |
 | `bridge_tags_written_total` | Tags stored through `Tag`. |
 | `bridge_auth_refused_total{reason}` | API calls refused at sign-in, by their error key (`auth.bearer_required`, `auth.token_invalid`, `auth.no_key_pinned`, `auth.token_expired`, `auth.not_a_client`, `auth.sa_not_a_client`). |
@@ -514,8 +515,7 @@ Alerts (`helm/values.yaml`, severity notice): `BridgeForgejoWebhookOff` (the For
 missing: no Forgejo event arrives). They ship with the ServiceMonitor, which stays `enabled: false` until the pinned image
 serves `:9090`: scraping an older image is connection refused, and the chart's TargetDown is a warning that Alertmanager
 routes to thot. A down or unscraped bridge lands there once it is on. kwatch liveness has no alert yet: it publishes only on
-changes, so silence on a calm cluster is normal; it waits for kwatch's own series. `bridge_type_uncontracted_total` is not
-shipped yet.
+changes, so silence on a calm cluster is normal; it waits for kwatch's own series.
 
 ## Tests
 
