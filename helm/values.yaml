@@ -101,7 +101,8 @@ env:
   # env, so a key of the same name in the envFrom Secret cannot override it.
   # Only bridge-core may be privileged; one subscription's filter must fit one
   # of its client's rules. bridge-atlas reads every type to resolve Systems and
-  # tags events with them (Tag); it publishes nothing. bridge-kwatch is the k8s
+  # tags events with them (Tag); it publishes nothing. It signs in with its pod's
+  # projected token ("sa"), or still with its authentik password. bridge-kwatch is the k8s
   # watch adapter (helm/kwatch.yaml): it publishes deploy and k8s events, reads
   # nothing. Its grant is the cross product of both lists (any deploy.* or
   # k8s.* type on argocd/ or k8s/), accepted: a type prefix ends with a dot, so
@@ -120,7 +121,7 @@ env:
                         {"types": ["dev.bnei.alert."], "subjects": [""]}]},
         "bridge-push": {"kind": "bot", "publish_types": [], "publish_subjects": [],
           "subscribe": [{"types": ["dev.bnei.game.needs_you."], "subjects": ["game/"]}]},
-        "bridge-atlas": {"kind": "machine", "publish_types": [], "publish_subjects": [], "tag": true,
+        "bridge-atlas": {"kind": "machine", "sa": "mountain:atlas", "publish_types": [], "publish_subjects": [], "tag": true,
           "subscribe": [{"types": ["dev.bnei."], "subjects": [""]}]},
         "bridge-kwatch": {"kind": "machine",
           "publish_types": ["dev.bnei.deploy.", "dev.bnei.k8s."], "publish_subjects": ["argocd/", "k8s/"]}
@@ -172,7 +173,8 @@ env:
   # Pod identity (plan M3): projected service account tokens, iss
   # https://192.168.1.211:6443, aud ukubi-bridge, verified against this pinned
   # cluster key (the Talos cluster's, kid M6S66zib..., from /openid/v1/jwks,
-  # 2026-11-22). A client row is matched by its "sa" field; none has one yet.
+  # 2026-11-22). A client row is matched by its "sa" field: bridge-atlas has one (mountain:atlas,
+  # infra-bootstrap gitops/platform/mountain), the others none yet.
   # An image that predates it ignores both variables. After a cluster rebuild,
   # re-pin it from `kubectl get --raw /openid/v1/jwks` (the check below warns).
   - name: BRIDGE_K8S_SA_KEY

@@ -37,6 +37,9 @@ func TestHelmClientTable(t *testing.T) {
 		}
 	}
 	// Atlas reads every type, Forgejo's included, and publishes nothing.
+	if atlas.SA != "mountain:atlas" {
+		t.Errorf("bridge-atlas sa %q, want mountain:atlas (its pod identity, infra gitops/platform/mountain)", atlas.SA)
+	}
 	if len(atlas.PublishTypes)+len(atlas.PublishSubjects) != 0 || !atlas.mayRead([]string{"dev.bnei."}, nil) {
 		t.Errorf("bridge-atlas: %+v", atlas)
 	}
