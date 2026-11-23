@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MohammadBnei/ukubi-bridge/internal/alert"
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 )
 
@@ -231,40 +233,116 @@ func TestTaggedLatestVersion(t *testing.T) {
 	}
 }
 
+const alertAt = "2026-10-18T09:00:00Z"
+
+func alertEv(status string) event.Event {
+	return event.Event{ID: "fp:" + status + ":" + alertAt, Source: "alertmanager", Type: "dev.bnei.alert." + status,
+		Subject: "alert/fp", Actor: event.ActorMachine, Data: []byte(`{"startsAt":"` + alertAt + `"}`), Time: time.Unix(0, 0)}
+}
+
+// Each case is a delivery sequence; want is the ce_id stored by each step ("" = deduped).
 func TestInsertAlertEpisodes(t *testing.T) {
+	f, r := "fp:firing:"+alertAt+":", "fp:resolved:"+alertAt+":"
+	cases := []struct {
+		name string
+		seq  []string
+		want []string
+	}{
+		{"firing and retry", []string{"firing", "firing"}, []string{f + "0", ""}},
+		{"resolved and retry", []string{"firing", "resolved", "resolved"}, []string{f + "0", r + "0", ""}},
+		{"re-fire after resolve", []string{"firing", "resolved", "firing", "firing"}, []string{f + "0", r + "0", f + "1", ""}},
+		{"second resolve", []string{"firing", "resolved", "firing", "resolved", "resolved"}, []string{f + "0", r + "0", f + "1", r + "1", ""}},
+		{"resolved without a stored firing", []string{"resolved", "resolved"}, []string{r + "0", ""}},
+		{"resolved, firing missing at R, retry", []string{"firing", "resolved", "resolved", "resolved"}, []string{f + "0", r + "0", "", ""}},
+		// Stale deliveries are indistinguishable from the next episode (identical payloads); pinned, see InsertAlert.
+		{"late firing retry after resolve is a re-fire", []string{"firing", "resolved", "firing"}, []string{f + "0", r + "0", f + "1"}},
+		{"late resolved retry after re-fire is a new resolve", []string{"firing", "resolved", "firing", "resolved"}, []string{f + "0", r + "0", f + "1", r + "1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := open(t)
+			ctx := context.Background()
+			for i, st := range c.seq {
+				e := alertEv(st)
+				got, err := s.InsertAlert(ctx, e)
+				if err != nil || got != (c.want[i] != "") {
+					t.Fatalf("step %d %s: stored=%v err=%v, want id %q", i, st, got, err, c.want[i])
+				}
+				if c.want[i] != "" {
+					var n int
+					if err := s.db.QueryRow(ctx, `SELECT count(*) FROM events WHERE ce_id = $1`, c.want[i]).Scan(&n); err != nil || n != 1 {
+						t.Fatalf("step %d: id %s count %d err %v", i, c.want[i], n, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Normalize on a real alerts[] element, through InsertAlert, yields the contract recipe.
+func TestInsertAlertFromNormalize(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
-	const at = "2026-10-18T09:00:00Z"
-	alert := func(status string) event.Event {
-		return event.Event{ID: "fp:" + status + ":" + at, Source: "alertmanager", Type: "dev.bnei.alert." + status,
-			Subject: "alert/fp", Actor: event.ActorMachine, Data: []byte(`{"startsAt":"` + at + `"}`), Time: time.Unix(0, 0)}
+	raw := json.RawMessage(`{"status":"firing","fingerprint":"abc123","startsAt":"` + alertAt + `","labels":{"alertname":"X"}}`)
+	e, err := alert.Normalize("alertmanager", raw, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
 	}
-	steps := []struct {
-		status string
-		want   bool
-		id     string
-	}{
-		{"firing", true, "fp:firing:" + at + ":0"},
-		{"firing", false, ""}, // retry / repeat notification
-		{"resolved", true, "fp:resolved:" + at + ":0"},
-		{"resolved", false, ""},                    // resolved retry
-		{"firing", true, "fp:firing:" + at + ":1"}, // re-fire after resolve
-		{"firing", false, ""},
-		{"resolved", true, "fp:resolved:" + at + ":1"}, // second resolve
-		{"resolved", false, ""},
+	if ok, err := s.InsertAlert(ctx, e); !ok || err != nil {
+		t.Fatal(ok, err)
 	}
-	for i, st := range steps {
-		got, err := s.InsertAlert(ctx, alert(st.status))
-		if err != nil || got != st.want {
-			t.Fatalf("step %d %s: stored=%v err=%v, want %v", i, st.status, got, err, st.want)
-		}
-		if st.want {
-			var n int
-			if err := s.db.QueryRow(ctx, `SELECT count(*) FROM events WHERE ce_id = $1`, st.id).Scan(&n); err != nil || n != 1 {
-				t.Fatalf("step %d: id %s count %d err %v", i, st.id, n, err)
+	var id string
+	var data []byte
+	if err := s.db.QueryRow(ctx, `SELECT ce_id, data FROM events`).Scan(&id, &data); err != nil {
+		t.Fatal(err)
+	}
+	if id != "abc123:firing:"+alertAt+":0" || string(data) != `{"labels": {"alertname": "X"}, "status": "firing", "startsAt": "`+alertAt+`", "fingerprint": "abc123"}` {
+		t.Fatalf("id %q data %s", id, data)
+	}
+}
+
+// Concurrent deliveries: the same row never lands twice, whatever the interleaving.
+func TestInsertAlertConcurrent(t *testing.T) {
+	run := func(t *testing.T, prior []string, burst []string, wantRows int) {
+		s := open(t)
+		ctx := context.Background()
+		for _, st := range prior {
+			if _, err := s.InsertAlert(ctx, alertEv(st)); err != nil {
+				t.Fatal(err)
 			}
 		}
+		var wg sync.WaitGroup
+		for _, st := range burst {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := s.InsertAlert(ctx, alertEv(st)); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		var n int
+		if err := s.db.QueryRow(ctx, `SELECT count(*) FROM events`).Scan(&n); err != nil || n != wantRows {
+			t.Fatalf("rows %d err %v, want %d", n, err, wantRows)
+		}
 	}
+	rep := func(st string, n int) (o []string) {
+		for range n {
+			o = append(o, st)
+		}
+		return
+	}
+	t.Run("duplicate firing", func(t *testing.T) { run(t, nil, rep("firing", 20), 1) })
+	t.Run("duplicate resolved at episode 1", func(t *testing.T) {
+		run(t, []string{"firing", "resolved", "firing"}, rep("resolved", 20), 4)
+	})
+	t.Run("firing racing resolved", func(t *testing.T) {
+		// Either order stores exactly two rows (firing:0+resolved:0, or resolved:0+firing:1).
+		for range 10 {
+			run(t, nil, []string{"firing", "resolved"}, 2)
+		}
+	})
 }
 
 // Ids stored before episodes existed (no suffix) keep their form and still dedup their retries.
@@ -281,34 +359,5 @@ func TestInsertAlertLegacyIDs(t *testing.T) {
 		if ok, err := s.InsertAlert(ctx, old); ok || err != nil {
 			t.Fatalf("legacy %s retry stored: %v %v", status, ok, err)
 		}
-	}
-}
-
-func TestInsertAlertConcurrentDuplicate(t *testing.T) {
-	s := open(t)
-	ctx := context.Background()
-	e := event.Event{ID: "fp:firing:x", Source: "alertmanager", Type: "dev.bnei.alert.firing", Subject: "alert/fp",
-		Actor: event.ActorMachine, Data: []byte(`{"startsAt":"x"}`), Time: time.Unix(0, 0)}
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	stored := 0
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ok, err := s.InsertAlert(ctx, e)
-			if err != nil {
-				t.Error(err)
-			}
-			if ok {
-				mu.Lock()
-				stored++
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	if stored != 1 {
-		t.Fatalf("stored %d rows, want 1", stored)
 	}
 }

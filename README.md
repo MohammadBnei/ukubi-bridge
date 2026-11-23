@@ -89,9 +89,11 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   list shifted while it was paged (a page repeats a PR: one updated mid-run
   jumped to page 1, and the PR it pushed past may have been skipped).
 - `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
-  one event per alert: `ce_id` = `fingerprint:status:startsAt`, so a
-  `repeat_interval` resend of the same firing coalesces while its resolution
-  is a new event. Type `dev.bnei.alert.firing|resolved`, subject
+  one event per alert: `ce_id` = `fingerprint:status:startsAt:episode`
+  (episode = resolved events already stored for that fingerprint and
+  `startsAt`), so a `repeat_interval` resend of the same firing coalesces
+  while its resolution, and a re-fire after it, are new events. Ids stored
+  before episodes (no suffix) keep their form and still dedup. Type `dev.bnei.alert.firing|resolved`, subject
   `alert/<fingerprint>`, `actor=machine`, neither trust fact. 503 when the store is
   down, so the sender retries.
 - `GET /healthz`.

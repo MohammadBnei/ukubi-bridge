@@ -114,8 +114,12 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 // firing episode, so its retry computes the same number. Ids stored before episodes
 // existed (no suffix) count as episode 0: their retries dedup.
 // Race-free: the episode is read inside insert's transaction, after the global advisory lock.
-// ponytail: a late retry of a firing after its resolve reads as a re-fire and is stored once more;
-// the payloads are identical, so the two cannot be told apart.
+// Known limits, all needing delivery reordering (one Alertmanager replica flushes a group sequentially,
+// so rare): payloads of a stale retry and of the next episode are identical, so (a) a resolved retry
+// arriving after a re-fire is stored as a new resolve and core dismisses the live proposal until the next
+// repeat_interval firing; (b) a firing retry arriving after its resolve is stored as a re-fire and leaves
+// an orphan proposal. The episode counts stored rows, so retention (30 days) can shrink it: an alert that
+// fires over 30 days with the same startsAt may reuse a number; it heals at the next repeat notification.
 func (s *Store) InsertAlert(ctx context.Context, e event.Event) (bool, error) {
 	return s.insert(ctx, e, func(tx pgx.Tx, e *event.Event) (bool, error) {
 		var d struct {
