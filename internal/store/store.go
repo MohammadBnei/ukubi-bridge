@@ -107,57 +107,65 @@ func (s *Store) Insert(ctx context.Context, e event.Event) (bool, error) {
 }
 
 // InsertAlert stores an alert event whose ID is the base fingerprint:status:startsAt
-// and appends its episode (ADR-0092): the number of resolved events already stored
-// for that fingerprint and startsAt. A firing that returns after a resolve is a new
-// episode, so UNIQUE(source, ce_id) keeps it; retries and repeat notifications of
-// the same state compute the same id and dedup. A resolved closes the latest stored
-// firing episode, so its retry computes the same number. Ids stored before episodes
-// existed (no suffix) count as episode 0: their retries dedup.
-// Race-free: the episode is read inside insert's transaction, after the global advisory lock.
-// Known limits, all needing delivery reordering (one Alertmanager replica flushes a group sequentially,
-// so rare): payloads of a stale retry and of the next episode are identical, so (a) a resolved retry
-// arriving after a re-fire is stored as a new resolve and core dismisses the live proposal until the next
-// repeat_interval firing; (b) a firing retry arriving after its resolve is stored as a re-fire and leaves
-// an orphan proposal. The episode counts stored rows, so retention (30 days) can shrink it: an alert that
-// fires over 30 days with the same startsAt may reuse a number; it heals at the next repeat notification.
+// and appends its episode (ADR-0092). The episode is read from the newest stored
+// alert row (firing or resolved) of that source, fingerprint and startsAt: its ce_id
+// suffix k (no suffix, a legacy id, is 0). A firing after resolved:k is the next
+// episode, k+1; any other firing is k. A resolved is k whatever the newest row is
+// (after resolved:k it is that resolve's retry). With no row the episode is 0.
+// Retries and repeat notifications of one state therefore compute the same id and
+// dedup, and UNIQUE(source, ce_id) keeps a re-fire. Episodes only grow with id and,
+// under the global advisory lock, id order is commit order, so when retention (by
+// ingested_at) deletes the newest row every older row is gone too: the numbering
+// restarts at 0 for a fresh alert and is never reused for a live one.
+// Race-free: the read happens inside insert's transaction, after the lock.
+// Known limits, both needing delivery reordering (one Alertmanager replica flushes a
+// group sequentially, so rare): payloads of a stale retry and of the next episode are
+// identical, so (a) a resolved retry arriving after a re-fire is stored as a new
+// resolve and core dismisses the live proposal until the next repeat_interval
+// firing; (b) a firing retry arriving after its resolve is stored as a re-fire and
+// leaves an orphan proposal.
+// startsAt is read case-sensitively, as SQL data->>'startsAt' does.
 func (s *Store) InsertAlert(ctx context.Context, e event.Event) (bool, error) {
-	return s.insert(ctx, e, func(tx pgx.Tx, e *event.Event) (bool, error) {
-		var d struct {
-			StartsAt string `json:"startsAt"`
-		}
-		if err := json.Unmarshal(e.Data, &d); err != nil {
+	var stored string
+	ok, err := s.insert(ctx, e, func(tx pgx.Tx, e *event.Event) (bool, error) {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(e.Data, &raw); err != nil {
 			return false, err
 		}
+		var startsAt string
+		_ = json.Unmarshal(raw["startsAt"], &startsAt) // absent or not a string: "", matches no row
 		fp := strings.TrimPrefix(e.Subject, "alert/")
-		exists := func(id string) (ok bool, err error) {
-			err = tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE source = $1 AND ce_id = $2)`,
-				e.Source, id).Scan(&ok)
-			return
-		}
-		var resolved int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM events WHERE source = $1 AND subject = $2
-			AND type = 'dev.bnei.alert.resolved' AND data->>'startsAt' = $3`,
-			e.Source, e.Subject, d.StartsAt).Scan(&resolved); err != nil {
+		var ceID, typ string
+		err := tx.QueryRow(ctx, `SELECT ce_id, type FROM events WHERE source = $1 AND subject = $2
+			AND type IN ('dev.bnei.alert.firing', 'dev.bnei.alert.resolved') AND data->>'startsAt' = $3
+			ORDER BY id DESC LIMIT 1`, e.Source, e.Subject, startsAt).Scan(&ceID, &typ)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return false, err
 		}
-		ep := resolved
-		if e.Type == "dev.bnei.alert.resolved" && ep > 0 {
-			open, err := exists(fp + ":firing:" + d.StartsAt + ":" + strconv.Itoa(ep))
-			if err != nil {
-				return false, err
-			}
-			if !open {
-				ep-- // the last resolve is already stored: this is its retry
+		ep := 0
+		if err == nil {
+			// What follows fp:status:startsAt is "" (legacy) or ":<k>".
+			base := fp + ":" + strings.TrimPrefix(typ, "dev.bnei.alert.") + ":" + startsAt
+			ep, _ = strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(ceID, base), ":"))
+			if typ == "dev.bnei.alert.resolved" && e.Type == "dev.bnei.alert.firing" {
+				ep++
 			}
 		}
 		if ep == 0 {
-			if old, err := exists(e.ID); err != nil || old {
+			var old bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE source = $1 AND ce_id = $2)`,
+				e.Source, e.ID).Scan(&old); err != nil || old {
 				return old, err
 			}
 		}
 		e.ID += ":" + strconv.Itoa(ep)
+		stored = e.ID
 		return false, nil
 	})
+	if err == nil {
+		slog.Info(e.Source+": event", "type", e.Type, "subject", e.Subject, "ce_id", stored, "new", ok)
+	}
+	return ok, err
 }
 
 func (s *Store) insert(ctx context.Context, e event.Event, prep func(pgx.Tx, *event.Event) (bool, error)) (bool, error) {

@@ -361,3 +361,54 @@ func TestInsertAlertLegacyIDs(t *testing.T) {
 		}
 	}
 }
+
+// The live migration: a pre-episode row, then the new code's first deliveries.
+func TestInsertAlertMigration(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if ok, err := s.Insert(ctx, alertEv("firing")); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	for i, c := range []struct{ status, want string }{
+		{"resolved", "fp:resolved:" + alertAt + ":0"}, {"firing", "fp:firing:" + alertAt + ":1"}, {"firing", ""},
+	} {
+		stored, err := s.InsertAlert(ctx, alertEv(c.status))
+		if err != nil || stored != (c.want != "") {
+			t.Fatalf("step %d %s: stored=%v err=%v", i, c.status, stored, err)
+		}
+		if c.want != "" {
+			var n int
+			if err := s.db.QueryRow(ctx, `SELECT count(*) FROM events WHERE ce_id = $1`, c.want).Scan(&n); err != nil || n != 1 {
+				t.Fatalf("step %d: id %s count %d err %v", i, c.want, n, err)
+			}
+		}
+	}
+}
+
+// Retention removes the oldest rows first: whatever is left, a replayed flap is stored as new, never deduped.
+func TestInsertAlertAfterRetention(t *testing.T) {
+	for name, keep := range map[string]string{"all aged": "", "newest kept": " AND id < (SELECT max(id) FROM events)"} {
+		t.Run(name, func(t *testing.T) {
+			s := open(t)
+			ctx := context.Background()
+			for _, st := range []string{"firing", "resolved", "firing", "resolved"} {
+				if _, err := s.InsertAlert(ctx, alertEv(st)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The retention cutoff, by ingested_at (rows are ingested in id order).
+			if _, err := s.db.Exec(ctx, `update events set ingested_at = now() - interval '31 days'`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(ctx, `delete from events where ingested_at < now() - interval '30 days'`+keep); err != nil {
+				t.Fatal(err)
+			}
+			for i, st := range []string{"firing", "resolved", "firing", "resolved"} {
+				stored, err := s.InsertAlert(ctx, alertEv(st))
+				if err != nil || !stored {
+					t.Fatalf("replay step %d %s deduped or failed: %v %v", i, st, stored, err)
+				}
+			}
+		})
+	}
+}

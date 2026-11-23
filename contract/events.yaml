@@ -43,7 +43,7 @@ types:
   - {type: dev.bnei.forge.action_run.recover, subject: "forge/<owner>/<repo>/run/<n>", ce_id: "<X-Forgejo-Delivery>", ce_id_kind: transport, producer: forgejo, trust: [actor_trusted, thread_owned], note: "a manual redelivery is stored twice; actor and owner are the trigger user, a fork PR's run is never owned"}
 
   # Alertmanager and Grafana routes: actor machine, no trust facts (an alert never wakes a session alone).
-  - {type: dev.bnei.alert.firing, subject: "alert/<fingerprint>", ce_id: "<fingerprint>:firing:<startsAt>:<episode>", ce_id_kind: fact, producer: alertmanager|grafana, trust: [], note: "episode = resolved events already stored for this fingerprint and startsAt, so a re-fire after a resolve is a new event; ids stored before episodes (no suffix) keep their form; the episode counts stored rows, so 30-day retention can shrink it (see InsertAlert)"}
+  - {type: dev.bnei.alert.firing, subject: "alert/<fingerprint>", ce_id: "<fingerprint>:firing:<startsAt>:<episode>", ce_id_kind: fact, producer: alertmanager|grafana, trust: [], note: "episode = the firing episode: the newest stored alert row of this fingerprint and startsAt sets it, and a firing after a resolve starts the next one, so a re-fire is a new event; ids stored before episodes (no suffix) count as 0 (see InsertAlert)"}
   - {type: dev.bnei.alert.resolved, subject: "alert/<fingerprint>", ce_id: "<fingerprint>:resolved:<startsAt>:<episode>", ce_id_kind: fact, producer: alertmanager|grafana, trust: [], note: "episode = the firing episode it closes (its retry dedups); ids stored before episodes (no suffix) keep their form"}
 
   # bridge-game (client bridge-game, subjects game/). The game does not publish yet; its types are named when

@@ -89,13 +89,16 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   list shifted while it was paged (a page repeats a PR: one updated mid-run
   jumped to page 1, and the PR it pushed past may have been skipped).
 - `POST /webhook/alertmanager` and `POST /webhook/grafana` — bearer token,
-  one event per alert: `ce_id` = `fingerprint:status:startsAt:episode`
-  (episode = resolved events already stored for that fingerprint and
-  `startsAt`), so a `repeat_interval` resend of the same firing coalesces
+  one event per alert: `ce_id` = `fingerprint:status:startsAt:episode`.
+  The episode is the firing episode the event belongs to: a firing after a
+  resolve starts the next one, and a resolved carries the episode it closes.
+  It comes from the newest stored alert row of that fingerprint and
+  `startsAt`. So a `repeat_interval` resend of the same firing coalesces
   while its resolution, and a re-fire after it, are new events. Ids stored
-  before episodes (no suffix) keep their form and still dedup. Type `dev.bnei.alert.firing|resolved`, subject
-  `alert/<fingerprint>`, `actor=machine`, neither trust fact. 503 when the store is
-  down, so the sender retries.
+  before episodes (no suffix) count as episode 0 and still dedup. Type
+  `dev.bnei.alert.firing|resolved`, subject `alert/<fingerprint>`,
+  `actor=machine`, neither trust fact. 503 when the store is down, so the
+  sender retries.
 - `GET /healthz`.
 - `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
   `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is

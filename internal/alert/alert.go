@@ -57,7 +57,8 @@ func Normalize(source string, raw json.RawMessage, now time.Time) (event.Event, 
 }
 
 // Handler serves one sender. source is "alertmanager" or "grafana"; token is
-// the shared bearer both send. insert is store.Insert.
+// the shared bearer both send. insert is store.InsertAlert, which logs the stored
+// ce_id (episode included).
 func Handler(source, token string, insert func(context.Context, event.Event) (bool, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(token) == "" {
@@ -86,7 +87,7 @@ func Handler(source, token string, insert func(context.Context, event.Event) (bo
 				slog.Warn(source+": alert skipped", "err", err, "alert", string(raw))
 				continue
 			}
-			inserted, err := insert(r.Context(), e)
+			_, err = insert(r.Context(), e)
 			if err != nil {
 				// 503: the sender retries the whole group; what already landed dedups.
 				slog.Error(source+": store", "id", e.ID, "err", err)
@@ -94,7 +95,6 @@ func Handler(source, token string, insert func(context.Context, event.Event) (bo
 				return
 			}
 			metrics.Event(source, e.Type)
-			slog.Info(source+": event", "type", e.Type, "subject", e.Subject, "new", inserted)
 		}
 		w.WriteHeader(http.StatusAccepted)
 	})
