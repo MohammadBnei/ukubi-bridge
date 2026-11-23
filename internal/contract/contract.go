@@ -116,6 +116,9 @@ func Flags(t string) []string {
 	return []string{"uncontracted"}
 }
 
+// Reset forgets the loaded contract. For tests, which t.Cleanup it after a Load.
+func Reset() { cur.Store(nil) }
+
 // Loaded reports whether any contract has ever loaded.
 func Loaded() bool { return cur.Load() != nil }
 

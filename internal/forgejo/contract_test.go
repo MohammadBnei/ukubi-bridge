@@ -9,6 +9,7 @@ import (
 
 // Every kind/action pair the adapter accepts builds a type the event contract lists.
 func TestTypesContracted(t *testing.T) {
+	t.Cleanup(contract.Reset)
 	if err := contract.Load("../../contract/events.yaml"); err != nil {
 		t.Fatal(err)
 	}

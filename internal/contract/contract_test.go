@@ -11,7 +11,8 @@ import (
 const real = "../../contract/events.yaml"
 
 func TestLoadRules(t *testing.T) {
-	cur.Store(nil)
+	Reset()
+	t.Cleanup(Reset)
 	if Loaded() || Known("dev.bnei.forge.issues.opened") {
 		t.Fatal("nothing loaded: not Loaded, nothing Known")
 	}
@@ -38,6 +39,7 @@ func TestLoadRules(t *testing.T) {
 // contract. Prefixes (ending in a dot) are client-table grants, not types. The adapters that build their types
 // from a payload (forgejo, github, alert) have their own constructor tests.
 func TestSourceLiteralsContracted(t *testing.T) {
+	t.Cleanup(Reset)
 	if err := Load(real); err != nil {
 		t.Fatal(err)
 	}
@@ -92,5 +94,29 @@ func TestPrefixForm(t *testing.T) {
 	}
 	if _, err := Parse([]byte("types:\n  - {type: \"dev.bnei.agent.*\"}\n")); err != nil {
 		t.Error(err)
+	}
+}
+
+// The event types agent-fleet's core reads (core/internal/dispatch, cardevents on origin/main, 2026-11-23) are in
+// the contract: dropping one here would silently stop that dispatch. The forge subset is the kinds and actions the
+// dispatcher branches on (PR closed and opened, issue opened, comments, reviews, runs).
+func TestCoreConsumedTypesContracted(t *testing.T) {
+	t.Cleanup(Reset)
+	if err := Load(real); err != nil {
+		t.Fatal(err)
+	}
+	for _, ty := range []string{
+		"dev.bnei.forge.pull_request.opened", "dev.bnei.forge.pull_request.closed",
+		"dev.bnei.forge.issues.opened", "dev.bnei.forge.issue_comment.created",
+		"dev.bnei.forge.pull_request_review.approved", "dev.bnei.forge.pull_request_review.rejected", "dev.bnei.forge.pull_request_review.comment",
+		"dev.bnei.forge.action_run.success", "dev.bnei.forge.action_run.failure", "dev.bnei.forge.action_run.recover",
+		"dev.bnei.alert.firing", "dev.bnei.alert.resolved",
+		"dev.bnei.agent.handoff", // core's publish takes any dev.bnei.agent.<x>
+		"dev.bnei.fleet.card.opened", "dev.bnei.fleet.card.answered", "dev.bnei.fleet.card.expired",
+		"dev.bnei.fleet.card.stale", "dev.bnei.fleet.card.withdrawn",
+	} {
+		if !Known(ty) {
+			t.Errorf("core consumes %s: not in contract/events.yaml", ty)
+		}
 	}
 }

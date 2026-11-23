@@ -13,6 +13,7 @@ import (
 // With no contract loaded nothing is flagged (consumers drop flagged events); once loaded, a type
 // outside it is, and blessing it unflags it at the next delivery.
 func TestFlags(t *testing.T) {
+	t.Cleanup(contract.Reset)
 	e := event.Event{Type: "dev.bnei.new.thing"}
 	if flags(e) != nil {
 		t.Fatal("no contract loaded: no flag")

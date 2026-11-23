@@ -150,6 +150,7 @@ func TestHandlerCountsEvents(t *testing.T) {
 
 // Both statuses an alert can have build a type the event contract lists.
 func TestTypesContracted(t *testing.T) {
+	t.Cleanup(contract.Reset)
 	if err := contract.Load("../../contract/events.yaml"); err != nil {
 		t.Fatal(err)
 	}
