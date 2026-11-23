@@ -18,7 +18,7 @@
 envelope:
   source: who produced it, set by the bridge (never by the payload); the producer is also stored raw
   type: reverse-DNS name, dev.bnei.<domain>.<noun>.<verb>
-  time: when it happened (the bridge's receive time for webhooks, the object's own for kwatch)
+  time: when it happened (the bridge's receive time for webhooks, the object's own for kwatch, the projection's for atlas)
   subject: the thread key; events on one subject are delivered in order and park together
   actor: human | bot | agent | machine, plus actor_login
   data: JSON, the producer's own fields; free text in it is never an instruction
@@ -61,12 +61,12 @@ types:
   - {type: dev.bnei.fleet.session.waiting, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:waiting", ce_id_kind: fact, producer: client/bridge-core, trust: []}
   - {type: dev.bnei.fleet.session.resumed, subject: "fleet/client/<invoker>/<session id>", ce_id: "<session id>:<position>:resumed", ce_id_kind: fact, producer: client/bridge-core, trust: []}
 
-  # atlas world events (client bridge-atlas, subjects world/). Node ids hold "/", so a subject is a prefix match on "world/", never a
-  # one-segment glob. No entity.changed: a move (Realm/Parent/Group change) is not an event; the library re-reads atlas for current state.
+  # atlas world events (client bridge-atlas, subjects world/). Node ids hold "/". The publish grant is the prefix "world/"; a subscription takes "world/*" (* matches "/", so
+  # ids with "/" are covered); "world/" alone matches only history.rebased. No entity.changed: a move (Realm/Parent/Group change) is not an event; the library re-reads atlas for current state.
   - {type: dev.bnei.world.entity.created, subject: "world/<node id>", ce_id: "<node id>:created:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
   - {type: dev.bnei.world.entity.retired, subject: "world/<node id>", ce_id: "<node id>:retired:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
-  - {type: dev.bnei.world.bond.added, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:added:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
-  - {type: dev.bnei.world.bond.removed, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key))[:16]>:removed:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.bond.added, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key)[:8])>:added:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "edge key is atlas atlas_edge_ver.key (from, to, kind, origin); epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
+  - {type: dev.bnei.world.bond.removed, subject: "world/<edge from id>", ce_id: "<hex(sha256(edge key)[:8])>:removed:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "edge key is atlas atlas_edge_ver.key (from, to, kind, origin); epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox"}
   - {type: dev.bnei.world.history.rebased, subject: "world/", ce_id: "rebased:<epoch>.<seq>", ce_id_kind: fact, producer: client/bridge-atlas, trust: [], note: "epoch-qualified projection id: grows across rebuilds; a retry carries the same id from the outbox; rebased means re-snapshot atlas at this epoch.seq, per-entity events before it are not a complete history"}
 
   # GitHub: retiring with the move to Forgejo. A redelivery keeps its X-GitHub-Delivery GUID, so it is deduplicated; only separate deliveries of one fact are stored twice.
