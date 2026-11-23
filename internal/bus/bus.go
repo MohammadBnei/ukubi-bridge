@@ -799,7 +799,7 @@ func toProto(e event.Event, replayed bool) *bridgev1.CloudEvent {
 		Seq: e.Seq, Id: e.ID, Source: e.Source, Type: e.Type, Subject: e.Subject,
 		Time: timestamppb.New(e.Time), Data: e.Data, Actor: e.Actor, ActorLogin: e.ActorLogin,
 		ActorTrusted: e.ActorTrusted, ThreadOwned: e.ThreadOwned, Owner: e.Owner, Hops: int32(e.Hops), CausationId: e.CausationID,
-		Replayed: replayed, Flags: flags(e),
+		Replayed: replayed, Flags: flags(e), Producer: e.Producer,
 	}
 }
 

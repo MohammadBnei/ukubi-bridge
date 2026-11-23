@@ -16,7 +16,7 @@
 # Names in angle brackets are filled by the producer.
 
 envelope:
-  source: who produced it, set by the bridge (never by the payload); the producer is also stored raw
+  source: who produced it, set by the bridge (never by the payload); the producer is also stored raw and delivered as the producer field (JSON bytes, empty before the column existed)
   type: reverse-DNS name, dev.bnei.<domain>.<noun>.<verb>
   time: when it happened (the bridge's receive time for webhooks, the object's own for kwatch, the projection's for atlas)
   subject: the thread key; events on one subject are delivered in order and park together

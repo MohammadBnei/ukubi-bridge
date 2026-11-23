@@ -284,7 +284,7 @@ type Delivery struct {
 func (s *Store) Match(ctx context.Context, name string, after int64, limit int) ([]Delivery, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT e.id, e.source, e.ce_id, e.type, e.subject, e.time, e.data, e.actor, e.actor_login,
-		       e.actor_trusted, e.thread_owned, e.owner, e.hops, e.causation_id,
+		       e.actor_trusted, e.thread_owned, e.owner, e.hops, e.causation_id, e.producer,
 		       EXISTS (SELECT 1 FROM dead_letters d
 		               WHERE d.subscription = s.name AND d.subject = e.subject AND d.cleared_at IS NULL),
 		       bridge_untagged(s.systems, e.id), e.ingested_at, coalesce(cur.v, ''),
@@ -304,7 +304,7 @@ func (s *Store) Match(ctx context.Context, name string, after int64, limit int) 
 		var version string
 		var systems, resolutions []string
 		err := r.Scan(&d.Seq, &d.Source, &d.ID, &d.Type, &d.Subject, &d.Time, &d.Data, &d.Actor, &d.ActorLogin,
-			&d.ActorTrusted, &d.ThreadOwned, &d.Owner, &d.Hops, &d.CausationID, &d.Parked,
+			&d.ActorTrusted, &d.ThreadOwned, &d.Owner, &d.Hops, &d.CausationID, &d.Producer, &d.Parked,
 			&d.Untagged, &d.IngestedAt, &version, &systems, &resolutions)
 		for i := range systems {
 			d.Tags = append(d.Tags, Tag{Seq: d.Seq, System: systems[i], Resolution: resolutions[i], RegistryVersion: version})

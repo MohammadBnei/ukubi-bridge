@@ -402,7 +402,8 @@ ArgoCD sync: the bridge picks it up within a few minutes of the sync (kubelet's 
 Every event also stores its raw producer in `events.producer` (jsonb, null before this): `{"kind":"client","name":...}`
 for an API client (the name is the client table key: the verified authentik subject, or the row whose `sa` the service account token names; such a token adds
 `"ns"`, `"sa"` and `"pod"`, the pod it is bound to), `{"kind":"route","name":...}` for `forgejo-webhook`, `forgejo-relist`, `github-webhook`,
-`alertmanager` or `grafana`.
+`alertmanager` or `grafana`. A delivered `CloudEvent` carries it as `producer` (JSON bytes, field 18; empty for events
+stored before the column), so atlas can tag producer Systems.
 
 ## Errors
 

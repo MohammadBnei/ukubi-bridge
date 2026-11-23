@@ -44,6 +44,11 @@ message CloudEvent {
   // event's type is not in the bridge's event contract (only flagged once a
   // contract has loaded). Consumers must ack and skip an event carrying any flag.
   repeated string flags = 17;
+  // Set by the bridge on delivery, never on Publish: the raw JSON producer
+  // stored with the event, {"kind":"client"|"route","name":...} (a service
+  // account client adds "ns", "sa" and "pod"). Empty for an event stored
+  // before the column existed.
+  bytes producer = 18;
 }
 
 // BridgeService is the bus API. Callers authenticate with an authentik access

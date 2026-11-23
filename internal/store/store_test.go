@@ -48,7 +48,7 @@ func TestInsertDedup(t *testing.T) {
 	}
 }
 
-// The raw producer is written by Insert (nothing reads it back yet; atlas's read path is open).
+// The raw producer is written by Insert and read back by Match (delivered as CloudEvent.producer).
 func TestInsertProducer(t *testing.T) {
 	s := open(t)
 	e := ev("p")
@@ -59,6 +59,16 @@ func TestInsertProducer(t *testing.T) {
 	var got string
 	if err := s.db.QueryRow(context.Background(), `SELECT producer::text FROM events WHERE ce_id = 'p'`).Scan(&got); err != nil || got != `{"kind": "route", "name": "x"}` {
 		t.Fatalf("producer %q %v", got, err)
+	}
+	if _, _, _, err := s.Subscribe(context.Background(), "w", Filter{}); err != nil {
+		t.Fatal(err)
+	}
+	ds, err := s.Match(context.Background(), "w", 0, 10)
+	if err != nil || len(ds) != 1 || string(ds[0].Producer) != `{"kind": "route", "name": "x"}` {
+		t.Fatalf("match %v %v", ds, err)
+	}
+	if producerName(ds[0].Producer) != "x" || producerName(nil) != "unknown" {
+		t.Fatal("producerName")
 	}
 }
 
