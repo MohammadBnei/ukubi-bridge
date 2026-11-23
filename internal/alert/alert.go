@@ -36,6 +36,15 @@ func Normalize(source string, raw json.RawMessage, now time.Time) (event.Event, 
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return event.Event{}, err
 	}
+	// json.Unmarshal matches keys case-insensitively; the store looks startsAt up
+	// with data->>'startsAt', so only the exact key counts.
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return event.Event{}, err
+	}
+	if _, ok := keys["startsAt"]; !ok {
+		return event.Event{}, errSkip
+	}
 	if a.Status != "firing" && a.Status != "resolved" {
 		return event.Event{}, errSkip
 	}

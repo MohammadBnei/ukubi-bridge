@@ -146,7 +146,12 @@ func (s *Store) InsertAlert(ctx context.Context, e event.Event) (bool, error) {
 		if err == nil {
 			// What follows fp:status:startsAt is "" (legacy) or ":<k>".
 			base := fp + ":" + strings.TrimPrefix(typ, "dev.bnei.alert.") + ":" + startsAt
-			ep, _ = strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(ceID, base), ":"))
+			if rest := strings.TrimPrefix(strings.TrimPrefix(ceID, base), ":"); rest != "" {
+				var perr error
+				if ep, perr = strconv.Atoi(rest); perr != nil {
+					slog.Warn("alert episode suffix is not a number, using 0", "ce_id", ceID)
+				}
+			}
 			if typ == "dev.bnei.alert.resolved" && e.Type == "dev.bnei.alert.firing" {
 				ep++
 			}
@@ -155,6 +160,7 @@ func (s *Store) InsertAlert(ctx context.Context, e event.Event) (bool, error) {
 			var old bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE source = $1 AND ce_id = $2)`,
 				e.Source, e.ID).Scan(&old); err != nil || old {
+				stored = e.ID // legacy id, no episode suffix
 				return old, err
 			}
 		}

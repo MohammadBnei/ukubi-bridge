@@ -163,3 +163,12 @@ func TestTypesContracted(t *testing.T) {
 		}
 	}
 }
+
+// The store looks startsAt up by its exact key, so a miscased key is skipped, never stored under an id the
+// episode lookup cannot find (ADR-0092).
+func TestNormalizeNeedsExactStartsAtKey(t *testing.T) {
+	_, err := Normalize("alertmanager", json.RawMessage(`{"status":"firing","fingerprint":"f","StartsAt":"t"}`), time.Now())
+	if !errors.Is(err, errSkip) {
+		t.Fatalf("miscased startsAt: err = %v, want errSkip", err)
+	}
+}
