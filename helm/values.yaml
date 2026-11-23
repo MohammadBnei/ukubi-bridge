@@ -253,7 +253,7 @@ logAlerts:
     # The contract never loaded (nothing is flagged); logged every minute while it holds.
     - uid: event-contract-not-loaded
       title: Bridge event contract not loaded
-      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |= "event contract not loaded" [10m]))'
+      expr: 'sum(count_over_time({namespace="ukubi-bridge"} |~ "event contract not (loaded|configured)" [10m]))'
       threshold: 0
       for: 10m
       severity: warning
