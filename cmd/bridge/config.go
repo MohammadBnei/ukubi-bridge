@@ -54,7 +54,7 @@ type Config struct {
 
 	// Warnings are the optional settings that were set and did not satisfy their rule, in the order they were
 	// checked: each took its default (a retention or lookback default, no tracing, no reconcile loop), and main logs
-	// each at WARN. load's one refusal is a missing webhook secret; the settings only a constructor can check (the
+	// each at WARN. load refuses a missing webhook secret and a metrics port equal to PORT; the settings only a constructor can check (the
 	// client table, the pinned certificate, the database URL) still refuse in main, closed.
 	Warnings []*configError
 }
@@ -96,7 +96,7 @@ func (e *configError) log() { slog.Error(e.msg, e.args...) }
 // warn writes the warning's line.
 func (e *configError) warn() { slog.Warn(e.msg, e.args...) }
 
-// load reads the configuration from getenv. Its one refusal is a missing webhook secret: the bridge cannot do its
+// load reads the configuration from getenv. Its refusals are a missing webhook secret and a metrics port equal to PORT: the bridge cannot do its
 // job without it (main still refuses what only a constructor can check: see Config). Every other setting is optional, and a value that does not satisfy its rule is a warning
 // (Config.Warnings) and its default, in the order the settings are checked: the retention, the traces endpoint, the
 // App's key, the lookback.
@@ -146,9 +146,13 @@ func load(getenv func(string) string) (Config, *configError) {
 	if c.MetricsAddr = getenv("BRIDGE_METRICS_ADDR"); c.MetricsAddr == "" {
 		c.MetricsAddr = ":9090"
 	}
-	if _, p, err := net.SplitHostPort(c.MetricsAddr); err != nil || p == "" || p == c.Port {
-		c.warn("BRIDGE_METRICS_ADDR is not host:port on a port other than PORT; using the default", "value", c.MetricsAddr)
+	if _, p, err := net.SplitHostPort(c.MetricsAddr); err != nil || p == "" {
+		c.warn("BRIDGE_METRICS_ADDR is not host:port; using the default", "value", c.MetricsAddr)
 		c.MetricsAddr = ":9090"
+	}
+	// Two listeners on one port: the second fails to bind, and no default can fix it.
+	if _, p, _ := net.SplitHostPort(c.MetricsAddr); p == c.Port {
+		return Config{}, &configError{msg: "BRIDGE_METRICS_ADDR uses the same port as PORT: /metrics must not be on the public port", args: []any{"port", p}}
 	}
 	if c.Traces = getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"); c.Traces != "" {
 		if u, err := url.Parse(c.Traces); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" || u.Path == "/" {

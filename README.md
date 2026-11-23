@@ -488,7 +488,7 @@ loop for a private key that does not parse).
 | `BRIDGE_ALERT_TOKEN` | Bearer token Alertmanager and Grafana send. Unset: both alert endpoints answer 503. |
 | `BRIDGE_RETENTION` | Go duration, default `720h` (30 days), at least `24h`. Keep it longer than `BRIDGE_RECONCILE_LOOKBACK` and than the longest consumer outage you accept. |
 | `PORT` | Default `8080`. |
-| `BRIDGE_METRICS_ADDR` | Where `/metrics` is served, on its own listener (never the public port), default `:9090`. |
+| `BRIDGE_METRICS_ADDR` | Where `/metrics` is served, on its own listener (never the public port), default `:9090`; the bridge refuses to start when its port equals `PORT`. |
 | `BRIDGE_CLIENTS` | Retired (ADR-0066): ignored, with a warning at start, until the rollout drops it from the Secret. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional. The OTLP/HTTP traces URL in full (`…/v1/traces`): a span per API call and webhook route. Unset: no tracing. The SDK still reads its other `OTEL_*` variables (the exporter's headers, timeout, compression and certificates, `OTEL_BSP_*`, span limits, resource attributes); the endpoint and the service name (`ukubi-bridge`) are set in code and win. `OTEL_EXPORTER_OTLP_ENDPOINT` alone turns nothing on. A failed export logs `traces` at WARN. |
 

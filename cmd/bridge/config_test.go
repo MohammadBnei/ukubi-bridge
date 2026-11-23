@@ -114,6 +114,19 @@ func TestConfigRefusals(t *testing.T) {
 	}
 }
 
+// TestConfigMetricsPortRefused: /metrics on the public port (explicit, or the default :9090 under PORT=9090) refuses.
+func TestConfigMetricsPortRefused(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"explicit": {"PORT": "9091", "BRIDGE_METRICS_ADDR": "0.0.0.0:9091"},
+		"default":  {"PORT": "9090"},
+	} {
+		env["BRIDGE_GITHUB_WEBHOOK_SECRET"] = "s"
+		if _, err := load(envOf(env)); err == nil || !strings.Contains(err.msg, "same port as PORT") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // TestConfigWarnings: an optional setting that does not satisfy its rule is a warning, its line's words and
 // attributes, and its default; the bridge starts. Several are reported in the order they are checked.
 func TestConfigWarnings(t *testing.T) {
