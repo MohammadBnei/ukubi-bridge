@@ -261,8 +261,11 @@ func New(st *store.Store, clients map[string]Client, tokens Verifier) *Server {
 // Handler mounts the service on a mux, with ics inside the key fallback (standard §6: the fallback is outermost, so
 // it also keys what an interceptor returns; a tracing span sees the handler's error before it is keyed).
 func (s *Server) Handler(ics ...connect.Interceptor) (string, http.Handler) {
-	return bridgev1connect.NewBridgeServiceHandler(s, withInterceptors(ics...))
+	return bridgev1connect.NewBridgeServiceHandler(s, withInterceptors(ics...), connect.WithReadMaxBytes(maxRequest))
 }
+
+// maxRequest caps one request message, after decompression; same as a webhook body (cmd/bridge).
+const maxRequest = 2 << 20
 
 // errGapped ends a stream whose subscription a deletion run gapped (events it
 // had not acked are gone); errReplaced one a reconnect on the same name took over.
