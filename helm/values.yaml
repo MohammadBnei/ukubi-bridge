@@ -97,6 +97,11 @@ envFrom:
       name: ukubi-bridge-config
   - secretRef:
       name: ukubi-bridge-forgejo
+  # BRIDGE_INGEST_LAPTOP_SECRET and BRIDGE_INGEST_LAPTOP_REPOS for /ingest/laptop (README). optional: without
+  # the Secret the pod starts and the route is off (404, one ERROR line).
+  - secretRef:
+      name: ukubi-bridge-ingest
+      optional: true
 
 env:
   # Logins whose PRs and comments may open threads.
