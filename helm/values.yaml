@@ -56,7 +56,7 @@ affinity:
 # /webhook/alertmanager, /webhook/grafana, /webhook/forgejo and the
 # BridgeService API are reachable only in-cluster. The baseline chain (origin
 # lock, rate limit, headers) stays on. /webhook/forgejo is routed too, LAN-only
-# from the Forgejo host (below).
+# from the Forgejo host, and /ingest/laptop, LAN-only (both below).
 ingress:
   pathPrefix: /webhook/github
   # Forgejo (CT 305, 192.168.1.214) delivers over the LAN: CT 305 pins
@@ -70,6 +70,13 @@ ingress:
       priority: 100
       middlewares:
         - name: forgejo-only
+          namespace: ukubi-bridge
+    # POST /ingest/laptop (README), LAN only.
+    ingest-laptop:
+      match: Host(`{{ .Values.ingress.hostname }}`) && PathPrefix(`/ingest/laptop`)
+      priority: 100
+      middlewares:
+        - name: ingest-lan-only
           namespace: ukubi-bridge
 
 # BRIDGE_DATABASE_URL, BRIDGE_GITHUB_WEBHOOK_SECRET, BRIDGE_GITHUB_APP_ID,
@@ -329,6 +336,17 @@ extraManifests:
       ipAllowList:
         sourceRange:
           - 192.168.1.214/32
+  # Only the LAN may reach /ingest/laptop (ingress.extraRoutes.ingest-laptop).
+  - |
+    apiVersion: traefik.io/v1alpha1
+    kind: Middleware
+    metadata:
+      name: ingest-lan-only
+      namespace: ukubi-bridge
+    spec:
+      ipAllowList:
+        sourceRange:
+          - 192.168.1.0/24
   # Flow health (README "Metrics"). Only flows live in production: the relist
   # and alert endpoints add theirs when they are switched on, GitHub is retired.
   # No {{ $labels }} in annotations: extraManifests go through Helm tpl.
