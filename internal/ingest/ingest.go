@@ -34,7 +34,7 @@ const (
 )
 
 const (
-	maxBody = 16 << 10
+	maxBody = 80 << 10
 	skew    = 5 * time.Minute
 	reading = 5 * time.Second // of the body
 	working = 2 * time.Second // on a post, before the store

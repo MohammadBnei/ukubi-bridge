@@ -102,11 +102,11 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
 - `POST /ingest/laptop` — one event per post a session outside the cluster makes, type `dev.bnei.laptop.post.created`,
   on only when `BRIDGE_INGEST_LAPTOP_SECRET` is a key (404 otherwise). `X-Ingest-Timestamp` is unix seconds, at most 5
   minutes off; `X-Ingest-Signature` is the hex HMAC-SHA256, keyed with the secret's 64 characters, of
-  `ingest/laptop\n<timestamp>\n<body>`. The body is a JSON object of at most 16 KiB; an unknown, duplicate or null field
+  `ingest/laptop\n<timestamp>\n<body>`. The body is a JSON object of at most 80 KiB; an unknown, duplicate or null field
   is refused:
   - `session`, `post_id`: lowercase UUIDs, minted by the sender. `ce_id` is `post/<session>/<post_id>`, so a retry is one
     event; the subject is `laptop/session/<session>`.
-  - `text`: Markdown kept as text, 1 to 2000 characters (`maxText` in `internal/ingest/laptop.go`), as sent and as stored.
+  - `text`: Markdown kept as text, 1 to 4000 characters (`maxText` in `internal/ingest/laptop.go`), as sent and as stored.
     A longer one is refused, never cut. Control, bidi and zero-width characters are dropped; nothing is rendered.
   - `session_label` (at most 200 characters, clamped to 60), `repo`, `branch` (at most 200): optional, shown and never checked.
   - `about`: up to 10 of `{"repo", "number"}`, the repo listed in `BRIDGE_INGEST_LAPTOP_REPOS`. Optional.

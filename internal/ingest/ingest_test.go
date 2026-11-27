@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
@@ -131,8 +133,8 @@ func TestPostRefuses(t *testing.T) {
 		"branch long": {map[string]any{"branch": long(201)}, "branch"}, "branch number": {map[string]any{"branch": 1}, "body"},
 		"no post_id": {map[string]any{"post_id": nil}, "post_id"}, "post_id not a uuid": {map[string]any{"post_id": postID + "/x"}, "post_id"},
 		"no text": {map[string]any{"text": nil}, "text"}, "empty text": {map[string]any{"text": ""}, "text"}, "blank text": {map[string]any{"text": " \n\u200b\t"}, "text"},
-		"text 2001 as sent": {map[string]any{"text": long(maxText) + "\u200b"}, "text: 2001 characters"}, "text 2001": {map[string]any{"text": long(maxText) + "a"}, "text: 2001 characters, the limit is 2000"}, "text number": {map[string]any{"text": 1}, "body"},
-		"text over once masked": {map[string]any{"text": long(maxText-10) + " pin: 4821"}, "text: 2004 characters"},
+		"text 4001 as sent": {map[string]any{"text": long(maxText) + "\u200b"}, "text: 4001 characters"}, "text 4001": {map[string]any{"text": long(maxText) + "a"}, "text: 4001 characters, the limit is 4000"}, "text number": {map[string]any{"text": 1}, "body"},
+		"text over once masked": {map[string]any{"text": long(maxText-10) + " pin: 4821"}, "text: 4004 characters"},
 		"about object":          {map[string]any{"about": map[string]any{}}, "body"}, "about many": {map[string]any{"about": slices.Repeat(ref("o/r", 1), 11)}, "about"},
 		"about unlisted": {map[string]any{"about": ref("o/x", 1)}, "about[0].repo"}, "about other case": {map[string]any{"about": ref("O/r", 1)}, "about[0].repo"},
 		"about null": {map[string]any{"about": ref(nil, 1)}, "about[0].repo"}, "about alert": {map[string]any{"about": []any{map[string]any{"alert": "x"}}}, "body"},
@@ -156,7 +158,7 @@ func TestPostRefuses(t *testing.T) {
 	}
 	// The positive control, each bound included.
 	for name, c := range map[string]map[string]any{
-		"as is": {}, "text 1": {"text": "x"}, "text 2000": {"text": strings.Repeat("é ", maxText/2-1) + "éé"}, "label 200": {"session_label": long(199) + "a"},
+		"as is": {}, "text 1": {"text": "x"}, "text 4000": {"text": strings.Repeat("é ", maxText/2-1) + "éé"}, "label 200": {"session_label": long(199) + "a"},
 		"bounds": {"repo": long(199) + "a", "branch": long(199) + "a", "about": slices.Repeat(ref("o/r", maxNumber), 10), "needs_you": slices.Repeat([]string{long(199) + "a"}, 10)},
 	} {
 		if _, _, err := Post(context.Background(), body(t, c), repos, now); err != nil {
@@ -304,7 +306,7 @@ func TestHandler(t *testing.T) {
 	long := body(t, map[string]any{"text": strings.Repeat("a ", maxText/2)[:maxText-10] + " pin: 4821"})
 	old := func(b []byte, d time.Duration) *http.Request { return signed(key, b, now.Add(d)) }
 	unsigned := func(h, v string) *http.Request { r := old(good, 0); r.Header.Set(h, v); return r }
-	const limit = 16 << 10
+	const limit = 80 << 10
 	big := []byte(strings.Repeat(" ", limit+1))
 	broken := httptest.NewRequest(http.MethodPost, "/ingest/laptop", io.NopCloser(failing{}))
 	dbErr := func(code string) error { return &pgconn.PgError{Code: code, Message: "x"} }
@@ -335,7 +337,7 @@ func TestHandler(t *testing.T) {
 		{"late over the rate", old(good, -skew-time.Second), 0, true, nil, 401, "skew", answer{Error: "timestamp: more than 5 minutes from the server's clock"}},
 		{"over the rate", old(good, 0), 0, true, nil, 429, "rate", answer{Error: "Too Many Requests"}},
 		{"invalid", old(bad, 0), 1, true, nil, 400, "invalid_body", answer{Error: "body: not a JSON object of the fields session, session_label, repo, branch, post_id, text, about, needs_you and corrects, each of its type"}},
-		{"too long, masked", old(long, 0), 1, true, nil, 400, "invalid_body", answer{Error: "text: 2004 characters, the limit is 2000", Masked: []string{"text"}}},
+		{"too long, masked", old(long, 0), 1, true, nil, 400, "invalid_body", answer{Error: "text: 4004 characters, the limit is 4000", Masked: []string{"text"}}},
 		{"store refused", old(good, 0), 1, true, dbErr("22P05"), 400, "store_refused", answer{Error: "Bad Request", Masked: []string{"text"}}},
 		{"store down", old(good, 0), 1, true, dbErr("57P01"), 503, "store_unavailable", answer{Error: "Service Unavailable"}},
 	} {
@@ -449,7 +451,7 @@ func TestSignatureFirst(t *testing.T) {
 			}
 		})
 	}
-	full := body(t, map[string]any{"text": strings.Repeat("\ufdfa", 2000)})
+	full := body(t, map[string]any{"text": strings.Repeat("\ufdfa", maxText)})
 	if blank, got := run(bytes.Repeat([]byte(" "), len(full))), run(full); got > blank+5 {
 		t.Errorf("%v allocations, %v for a blank body", got, blank)
 	}
@@ -512,6 +514,30 @@ func TestMaskingHeld(t *testing.T) {
 		if _, _, err := Post(ctx, body(t, nil), repos, now); !errors.Is(err, context.Canceled) {
 			t.Fatalf("%v", err)
 		}
+	}
+}
+
+// A post with every field at its limit, every character escaped as JSON allows, fits the cap and is stored.
+func TestLargestPost(t *testing.T) {
+	logs(t)
+	key, wide := []byte(fake(hexes, 64)), func(n int) string { return strings.Repeat("\U0001F600", n) }
+	b := body(t, map[string]any{"session_label": wide(maxRawLabel), "repo": wide(maxName), "branch": wide(maxName), "text": wide(maxText),
+		"about": slices.Repeat([]any{map[string]any{"repo": "o/r", "number": maxNumber}}, maxAbout), "needs_you": slices.Repeat([]string{wide(maxNeed)}, maxNeeds)})
+	var esc strings.Builder
+	for _, r := range string(b) {
+		if r < 0x80 {
+			esc.WriteRune(r)
+		} else {
+			hi, lo := utf16.EncodeRune(r)
+			fmt.Fprintf(&esc, `\u%04x\u%04x`, hi, lo)
+		}
+	}
+	h := handler(key, repos, func(context.Context, event.Event) (bool, error) { return true, nil }, func() time.Time { return now }, rate.NewLimiter(0, 1))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, signed(key, []byte(esc.String()), now))
+	t.Logf("%d bytes, cap %d", esc.Len(), maxBody)
+	if w.Code != http.StatusAccepted || esc.Len() > maxBody || esc.Len() <= maxBody-(4<<10) {
+		t.Errorf("%d bytes: %d %s", esc.Len(), w.Code, w.Body)
 	}
 }
 

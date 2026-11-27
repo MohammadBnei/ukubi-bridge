@@ -20,7 +20,7 @@ import (
 const PostCreated = "dev.bnei.laptop.post.created"
 
 // maxText is how many runes a post's text holds, after masking. A longer one is refused, never cut.
-const maxText = 2000
+const maxText = 4000
 
 // The other limits of a post.
 const (
