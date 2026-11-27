@@ -23,7 +23,8 @@ var envVars = []string{
 	"BRIDGE_RETENTION", "PORT", "BRIDGE_CLIENTS", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "BRIDGE_FORGEJO_WEBHOOK_SECRET",
 	"BRIDGE_FORGEJO_TRUSTED_LOGINS", "BRIDGE_FORGEJO_AGENT_LOGINS", "BRIDGE_FORGEJO_RELIST_REPOS",
 	"BRIDGE_FORGEJO_READER_TOKEN", "BRIDGE_FORGEJO_TOKEN_FILE", "BRIDGE_FORGEJO_URL", "BRIDGE_TAG_GRACE", "BRIDGE_CONTRACT_FILE",
-	"BRIDGE_METRICS_ADDR", "BRIDGE_K8S_SA_KEY", "BRIDGE_K8S_JWKS_URL",
+	"BRIDGE_METRICS_ADDR", "BRIDGE_K8S_SA_KEY", "BRIDGE_K8S_JWKS_URL", "BRIDGE_INGEST_LAPTOP_SECRET",
+	"BRIDGE_INGEST_LAPTOP_REPOS",
 }
 
 // Config is the bridge's whole configuration (mountain plan/15 §5): the environment, read once by load and checked
@@ -31,8 +32,10 @@ var envVars = []string{
 // the pinned certificate (auth.New), the pinned cluster key (auth.NewSA) and the database URL (store.Open).
 type Config struct {
 	WebhookSecret   string
-	ForgejoSecret   string // "": no /webhook/forgejo route
-	LegacyClients   bool   // BRIDGE_CLIENTS is set: ignored, with a warning (ADR-0066)
+	ForgejoSecret   string          // "": no /webhook/forgejo route
+	LaptopSecret    string          // not a key (ingest.Key): no /ingest/laptop route
+	LaptopRepos     map[string]bool // the repos a post may be about, as Forgejo names them; empty: none
+	LegacyClients   bool            // BRIDGE_CLIENTS is set: ignored, with a warning (ADR-0066)
 	APIClients      string
 	OIDC            OIDCConfig
 	K8s             K8sConfig
@@ -104,6 +107,7 @@ func load(getenv func(string) string) (Config, *configError) {
 	c := Config{
 		WebhookSecret: getenv("BRIDGE_GITHUB_WEBHOOK_SECRET"),
 		ForgejoSecret: getenv("BRIDGE_FORGEJO_WEBHOOK_SECRET"),
+		LaptopSecret:  getenv("BRIDGE_INGEST_LAPTOP_SECRET"),
 		LegacyClients: getenv("BRIDGE_CLIENTS") != "",
 		APIClients:    getenv("BRIDGE_API_CLIENTS"),
 		OIDC: OIDCConfig{Issuer: getenv("BRIDGE_OIDC_ISSUER"), ClientID: getenv("BRIDGE_OIDC_CLIENT_ID"),
@@ -173,6 +177,14 @@ func load(getenv func(string) string) (Config, *configError) {
 			c.warn("BRIDGE_K8S_JWKS_URL is not an https URL: it would send the pod's token in clear; the cluster key check is off")
 			c.K8s.JWKSURL = ""
 		}
+	}
+	c.LaptopRepos = map[string]bool{}
+	for r := range set(getenv("BRIDGE_INGEST_LAPTOP_REPOS")) {
+		if !repoName.MatchString(r) {
+			c.warn("BRIDGE_INGEST_LAPTOP_REPOS: not owner/repo; skipped", "value", r)
+			continue
+		}
+		c.LaptopRepos[r] = true
 	}
 	repos, token, tokenFile, forgejoURL := getenv("BRIDGE_FORGEJO_RELIST_REPOS"), strings.TrimSpace(getenv("BRIDGE_FORGEJO_READER_TOKEN")), getenv("BRIDGE_FORGEJO_TOKEN_FILE"), getenv("BRIDGE_FORGEJO_URL")
 	if forgejoURL == "" {

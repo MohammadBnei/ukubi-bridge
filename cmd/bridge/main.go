@@ -28,6 +28,7 @@ import (
 	"github.com/MohammadBnei/ukubi-bridge/internal/event"
 	"github.com/MohammadBnei/ukubi-bridge/internal/forgejo"
 	"github.com/MohammadBnei/ukubi-bridge/internal/github"
+	"github.com/MohammadBnei/ukubi-bridge/internal/ingest"
 	"github.com/MohammadBnei/ukubi-bridge/internal/metrics"
 	"github.com/MohammadBnei/ukubi-bridge/internal/store"
 )
@@ -96,6 +97,7 @@ func main() {
 	route("POST /webhook/github", githubHandler(st, policy, []byte(cfg.WebhookSecret)))
 	metrics.Enable(metrics.GithubWebhook)
 	forgejoRoute(route, st, cfg)
+	laptopRoute(route, st.Insert, cfg)
 	bus.TagGrace = cfg.TagGrace
 	api := bus.New(st, clients, auth.Tokens{OIDC: tokens, SA: sa})
 	mux.Handle(api.Handler(tel.Interceptors()...))
@@ -358,6 +360,17 @@ func forgejoRoute(route func(string, http.Handler), st *store.Store, cfg Config)
 	metrics.Enable(metrics.ForgejoWebhook)
 	policy := github.Policy{Trusted: cfg.ForgejoTrusted, Agents: cfg.ForgejoAgents}
 	route("POST /webhook/forgejo", forgejoHandler(st, policy, []byte(cfg.ForgejoSecret)))
+}
+
+// laptopRoute adds POST /ingest/laptop when its secret is a key. Otherwise: no route (404), and one error.
+func laptopRoute(route func(string, http.Handler), insert func(context.Context, event.Event) (bool, error), cfg Config) {
+	if why := ingest.Key(cfg.LaptopSecret); why != "" {
+		slog.Error("ingest laptop off: BRIDGE_INGEST_LAPTOP_SECRET is not a key", "why", why)
+		metrics.SetEnabled(metrics.IngestLaptop, false)
+		return
+	}
+	metrics.Enable(metrics.IngestLaptop)
+	route("POST /ingest/laptop", ingest.Laptop(cfg.LaptopSecret, cfg.LaptopRepos, insert))
 }
 
 // forgejoHandler is githubHandler for Forgejo's webhook (content type

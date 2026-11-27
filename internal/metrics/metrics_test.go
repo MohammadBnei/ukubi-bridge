@@ -18,6 +18,13 @@ func TestPrefix(t *testing.T) {
 	}
 }
 
+// A built-in flow's name is no client's.
+func TestBuiltin(t *testing.T) {
+	if !Builtin(IngestLaptop) || Builtin("bridge-core") {
+		t.Error("ingest-laptop is built in, bridge-core is not")
+	}
+}
+
 func TestEventAndEnabled(t *testing.T) {
 	Event("t-flow", "dev.bnei.k8s.pod.warning")
 	Event("t-flow", "dev.bnei.k8s.pod.warning")

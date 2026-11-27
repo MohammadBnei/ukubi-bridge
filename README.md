@@ -99,6 +99,26 @@ agent-fleet's side is its ADR-0071 (dispatch) and ADR-0072 (approval-gated execu
   `dev.bnei.alert.firing|resolved`, subject `alert/<fingerprint>`,
   `actor=machine`, neither trust fact. 503 when the store is down, so the
   sender retries.
+- `POST /ingest/laptop` — one event per post a session outside the cluster makes, type `dev.bnei.laptop.post.created`,
+  on only when `BRIDGE_INGEST_LAPTOP_SECRET` is a key (404 otherwise). `X-Ingest-Timestamp` is unix seconds, at most 5
+  minutes off; `X-Ingest-Signature` is the hex HMAC-SHA256, keyed with the secret's 64 characters, of
+  `ingest/laptop\n<timestamp>\n<body>`. The body is a JSON object of at most 16 KiB; an unknown, duplicate or null field
+  is refused:
+  - `session`, `post_id`: lowercase UUIDs, minted by the sender. `ce_id` is `post/<session>/<post_id>`, so a retry is one
+    event; the subject is `laptop/session/<session>`.
+  - `text`: Markdown kept as text, 1 to 2000 characters (`maxText` in `internal/ingest/laptop.go`), as sent and as stored.
+    A longer one is refused, never cut. Control, bidi and zero-width characters are dropped; nothing is rendered.
+  - `session_label` (at most 200 characters, clamped to 60), `repo`, `branch` (at most 200): optional, shown and never checked.
+  - `about`: up to 10 of `{"repo", "number"}`, the repo listed in `BRIDGE_INGEST_LAPTOP_REPOS`. Optional.
+  - `needs_you`: absent, or up to 10 strings of 1 to 200 characters. An empty list is kept as one: it clears.
+  - `corrects`: another post's `post_id`. Optional.
+
+  The server sets the source (`ingest/laptop`), `actor=machine`, the time (when it was received) and neither trust fact.
+  Credentials in any text are replaced with `[masked]` before anything is stored or logged
+  (`internal/ingest/mask.go`). The answer is JSON: `post_id` and `new` (false for a
+  retry) on 202, `error` otherwise, and `masked`, the names of the fields something was masked in, on either. An error
+  names a field and a limit, never a value. 400 body, 401 signature or timestamp, 413 size, 429 over 10 a minute (20 at
+  once), 503 store down or busy.
 - `GET /healthz`.
 - `bridge.v1.BridgeService` (Connect, gRPC and gRPC-Web on the same port,
   `proto/bridge/v1/bridge.proto`). Internal only: the public IngressRoute is
@@ -402,7 +422,7 @@ ArgoCD sync: the bridge picks it up within a few minutes of the sync (kubelet's 
 Every event also stores its raw producer in `events.producer` (jsonb, null before this): `{"kind":"client","name":...}`
 for an API client (the name is the client table key: the verified authentik subject, or the row whose `sa` the service account token names; such a token adds
 `"ns"`, `"sa"` and `"pod"`, the pod it is bound to), `{"kind":"route","name":...}` for `forgejo-webhook`, `forgejo-relist`, `github-webhook`,
-`alertmanager` or `grafana`. A delivered `CloudEvent` carries it as `producer` (JSON bytes, field 18; empty for events
+`ingest-laptop`, `alertmanager` or `grafana`. A delivered `CloudEvent` carries it as `producer` (JSON bytes, field 18; empty for events
 stored before the column), so atlas can tag producer Systems.
 
 ## Errors
@@ -467,6 +487,8 @@ loop for a private key that does not parse).
 | `BRIDGE_DATABASE_URL` | Postgres URL. The primary directly, not pgbouncer (LISTEN needs session mode). |
 | `BRIDGE_GITHUB_WEBHOOK_SECRET` | The App's webhook secret. Required. |
 | `BRIDGE_FORGEJO_WEBHOOK_SECRET` | The Forgejo webhook's secret. Unset: `/webhook/forgejo` is off (404), logged at WARN. |
+| `BRIDGE_INGEST_LAPTOP_SECRET` | The key of `/ingest/laptop`: 64 lowercase hex characters (`openssl rand -hex 32`), read at start. Unset or anything else (a trailing newline too): the route is off (404), `ingest-laptop` reads 0 and one ERROR says why, without the value. |
+| `BRIDGE_INGEST_LAPTOP_REPOS` | Comma-separated `owner/repo`, written as Forgejo writes them, that a post may be `about`. Unset: none. An entry that is not `owner/repo` is skipped with a warning. |
 | `BRIDGE_FORGEJO_TRUSTED_LOGINS`, `BRIDGE_FORGEJO_AGENT_LOGINS` | `BRIDGE_TRUSTED_LOGINS` and `BRIDGE_AGENT_LOGINS` for Forgejo logins, read by `/webhook/forgejo` only. |
 | `BRIDGE_FORGEJO_RELIST_REPOS` | Comma-separated `owner/repo` the Forgejo relist loop watches. Unset or empty: the loop is off. An entry that is not `owner/repo` is skipped with a warning. |
 | `BRIDGE_FORGEJO_READER_TOKEN` | A Forgejo token with `read:repository` and `read:issue` only (the `bridge-reader` bot), read at start (a rotation needs a pod restart: the Secret `ukubi-bridge-forgejo` is not reloaded automatically). Without it and without `BRIDGE_FORGEJO_TOKEN_FILE` the relist loop is off, with a warning. |
@@ -496,7 +518,7 @@ loop for a private key that does not parse).
 
 `/metrics` is served on its own listener, `BRIDGE_METRICS_ADDR` (default `:9090`), never on the public port; the chart's
 Service and ServiceMonitor carry it as the `metrics` port. A flow is one of `forgejo-webhook`, `forgejo-relist`,
-`github-webhook`, `github-reconcile`, `alertmanager`, `grafana`, `oidc-jwks` (the hourly certificate check),
+`github-webhook`, `github-reconcile`, `alertmanager`, `grafana`, `ingest-laptop`, `oidc-jwks` (the hourly certificate check),
 `k8s-sa-auth` (service account sign-in, on while `BRIDGE_K8S_SA_KEY` is pinned), `k8s-sa-jwks` (the hourly cluster key
 check), or an API client's name (its `Publish`, e.g. `bridge-kwatch`). A flow that is switched off by missing configuration reads 0 on `bridge_flow_enabled` (most log one WARN naming the setting;
 an API client's flow reads 0 while none of its tokens can be verified: no certificate pinned, and no cluster key or no `sa`). `oidc-jwks`, `k8s-sa-auth`, `k8s-sa-jwks` and `github-reconcile` only report
@@ -511,6 +533,7 @@ enabled: their runs and failures log, they record no event series.
 | `bridge_relist_runs_total{result}` | Forgejo relist runs, `ok` or `error`. |
 | `bridge_tags_written_total` | Tags stored through `Tag`. |
 | `bridge_auth_refused_total{reason}` | API calls refused at sign-in, by their error key (`auth.bearer_required`, `auth.token_invalid`, `auth.no_key_pinned`, `auth.token_expired`, `auth.not_a_client`, `auth.sa_not_a_client`). |
+| `bridge_ingest_refused_total{flow,reason}` | Requests refused on an ingest route: `too_large`, `unreadable`, `bad_signature`, `skew`, `rate`, `busy`, `invalid_body`, `store_refused` or `store_unavailable`. |
 
 Alerts (`helm/values.yaml`, severity notice): `BridgeForgejoWebhookOff` (the Forgejo secret is unset, or the series is
 missing: no Forgejo event arrives). They ship with the ServiceMonitor, which stays `enabled: false` until the pinned image

@@ -41,7 +41,7 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{WebhookSecret: "s", Trusted: map[string]bool{}, Agents: map[string]bool{},
-		ForgejoTrusted: map[string]bool{}, ForgejoAgents: map[string]bool{}, Retention: 720 * time.Hour, TagGrace: time.Minute, Port: "8080", MetricsAddr: ":9090"}
+		ForgejoTrusted: map[string]bool{}, ForgejoAgents: map[string]bool{}, LaptopRepos: map[string]bool{}, Retention: 720 * time.Hour, TagGrace: time.Minute, Port: "8080", MetricsAddr: ":9090"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)
 	}
@@ -67,7 +67,7 @@ func TestConfigEnv(t *testing.T) {
 	c.App = nil
 	want := Config{WebhookSecret: "s", LegacyClients: true, APIClients: "{}", OIDC: OIDCConfig{"i", "c", "pem", "j"},
 		DatabaseURL: "db", Trusted: map[string]bool{"a": true, "b": true}, Agents: map[string]bool{"c": true},
-		ForgejoSecret: "f", ForgejoTrusted: map[string]bool{"d": true}, ForgejoAgents: map[string]bool{"e": true},
+		ForgejoSecret: "f", ForgejoTrusted: map[string]bool{"d": true}, ForgejoAgents: map[string]bool{"e": true}, LaptopRepos: map[string]bool{},
 		AlertToken: "t", Retention: 48 * time.Hour, TagGrace: 90 * time.Second, Port: "9", MetricsAddr: ":9090"}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("%+v, want %+v", c, want)

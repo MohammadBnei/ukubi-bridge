@@ -20,6 +20,7 @@ const (
 	GithubReconcile = "github-reconcile"
 	Alertmanager    = "alertmanager"
 	Grafana         = "grafana"
+	IngestLaptop    = "ingest-laptop"
 	OIDCJWKS        = "oidc-jwks"   // the hourly JWKS check against the pinned certificate
 	K8sSAAuth       = "k8s-sa-auth" // service account tokens: on while a cluster key is pinned
 	K8sJWKS         = "k8s-sa-jwks" // the hourly cluster JWKS check against the pinned key
@@ -41,6 +42,8 @@ var (
 		Help: "Stored events whose type is not in the event contract, by producer (an API client row or a route name)."}, []string{"producer"})
 	authRefused = promauto.NewCounterVec(prometheus.CounterOpts{Name: "bridge_auth_refused_total",
 		Help: "API calls refused at sign-in, by reason (the error key: a closed set)."}, []string{"reason"})
+	ingestRefused = promauto.NewCounterVec(prometheus.CounterOpts{Name: "bridge_ingest_refused_total",
+		Help: "Requests refused on an ingest route, by reason (a closed set)."}, []string{"flow", "reason"})
 )
 
 // TypeUncontracted records one stored event of an uncontracted type; producer is its client row or route name.
@@ -57,22 +60,39 @@ func AuthRefused(reason string) { authRefused.WithLabelValues(reason).Inc() }
 // AuthRefusedFor is the refused counter of reason (tests).
 func AuthRefusedFor(reason string) prometheus.Counter { return authRefused.WithLabelValues(reason) }
 
+// IngestReasons are the reasons an ingest route refuses a request for.
+var IngestReasons = []string{"too_large", "unreadable", "bad_signature", "skew", "rate", "busy", "invalid_body", "store_refused", "store_unavailable"}
+
+// IngestRefused records one request refused on an ingest flow; reason is one of IngestReasons.
+func IngestRefused(flow, reason string) { ingestRefused.WithLabelValues(flow, reason).Inc() }
+
+// IngestRefusedFor is the refused counter of flow and reason (tests).
+func IngestRefusedFor(flow, reason string) prometheus.Counter {
+	return ingestRefused.WithLabelValues(flow, reason)
+}
+
 // Builtin reports whether name is one of the built-in flows.
 func Builtin(name string) bool {
 	switch name {
-	case ForgejoWebhook, ForgejoRelist, GithubWebhook, GithubReconcile, Alertmanager, Grafana, OIDCJWKS, K8sSAAuth, K8sJWKS:
+	case ForgejoWebhook, ForgejoRelist, GithubWebhook, GithubReconcile, Alertmanager, Grafana, IngestLaptop, OIDCJWKS, K8sSAAuth, K8sJWKS:
 		return true
 	}
 	return false
 }
 
 // Enable sets the flow's gauge to 1. The relist flow also creates both its run
-// series at 0, so increase() sees the first error after a start.
+// series at 0, so increase() sees the first error after a start; the ingest flow
+// its refusal series.
 func Enable(flow string) {
 	flowEnabled.WithLabelValues(flow).Set(1)
 	if flow == ForgejoRelist {
 		relistRuns.WithLabelValues("error").Add(0)
 		relistRuns.WithLabelValues("ok").Add(0)
+	}
+	if flow == IngestLaptop {
+		for _, r := range IngestReasons {
+			ingestRefused.WithLabelValues(flow, r).Add(0)
+		}
 	}
 }
 

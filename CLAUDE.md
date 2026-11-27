@@ -13,7 +13,7 @@ Rules: workspace CLAUDE.md; change rules mountain `plan/16-dev-rules.md`.
 - `python3 .github/scripts/check_trailers_test.py` tests the trailers check.
 
 ## Layout
-`cmd/bridge` (server), `cmd/kwatch` (second binary, own Deployment), `internal/{event,store,bus,auth,github,forgejo,alert,contract,metrics}`,
+`cmd/bridge` (server), `cmd/kwatch` (second binary, own Deployment), `internal/{event,store,bus,auth,github,forgejo,alert,ingest,contract,metrics}`,
 `proto/` (buf module), `contract/events.yaml` (the event contract), `helm/`, `Dockerfile` (one image, both binaries).
 
 ## Traps
